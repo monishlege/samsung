@@ -4,6 +4,7 @@ A beginner-friendly campus complaint and facilities management dashboard built w
 
 ## Features
 - Roles: Student, Faculty, Admin and Maintenance Staff
+- Secure sign-in, student/faculty registration and admin role management
 - Complaint submission and status tracking
 - AI-assisted category and priority suggestions (keyword-based starter engine)
 - Possible duplicate report detection
@@ -34,15 +35,25 @@ This project uses Streamlit and should be deployed on Streamlit Community Cloud,
 2. Select **Create app** and choose the `monishlege/samsung` repository and `main` branch.
 3. Set the main file path to `app.py`, then deploy.
 
-Dependencies are listed in `requirements.txt`. The SQLite database is created on startup; data stored on a hosted instance may not persist across restarts.
+Dependencies are listed in `requirements.txt`. Add the initial administrator credentials in the app's Streamlit secrets before deployment:
 
-## Demo accounts
-| Role | Username | Password |
-|---|---|---|
-| Admin | admin | admin123 |
-| Student | student | student123 |
-| Faculty | faculty | faculty123 |
-| Maintenance | staff | staff123 |
+```toml
+[auth]
+admin_username = "campusadmin"
+admin_password = "replace-with-a-unique-password-of-at-least-16-characters"
+```
+
+The first configured admin is created only when the database has no administrator. Do not commit credentials or a local `secrets.toml` file. Students and faculty can create accounts from the sign-in page; an administrator assigns Admin or Maintenance Staff roles.
+
+## Sign-in and database
+
+- Passwords are stored as salted PBKDF2 hashes, not plaintext. Passwords must be at least 12 characters; the bootstrap administrator password must be at least 16 characters.
+- Sign-in is temporarily locked after five failed attempts for the same username.
+- Sessions expire after 30 minutes of inactivity or 12 hours total.
+- Students and faculty can only view their own complaints. Admin and Maintenance Staff accounts can view all complaints.
+- The default SQLite file is `campus.db` beside the application. Set `CAMPUS_DB_PATH` (or `[database].path` in Streamlit secrets) to choose another path.
+
+**SQLite on Streamlit Community Cloud is not production-persistent.** Its local filesystem can be reset and does not provide durable backups or safe shared storage across multiple app instances. This SQLite configuration is suitable for local development or a single server with a persistent disk and managed backups. Before a production deployment on Community Cloud or any multi-instance host, move accounts and complaints to a managed, persistent database and configure backups.
 
 ## Important
-This is a local academic prototype. The included AI engine uses explainable keyword and text-similarity rules; it is not a trained machine-learning model. Passwords are stored as plain text for demo simplicity. Before real deployment, add password hashing, secure sessions, authorization tests, backups and a proper production database.
+This remains an academic prototype, not a fully production-ready service. The AI engine uses explainable keyword rules, not a trained model. Before handling real campus data, add a persistent managed database, automated backups, email verification, password reset and MFA policies, operational monitoring, and a privacy review.

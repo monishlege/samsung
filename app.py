@@ -1,11 +1,17 @@
 
-import streamlit as st
-import pandas as pd
 import base64
+import logging
+import os
+import time
 from pathlib import Path
+
+import pandas as pd
+import streamlit as st
 
 import database
 import ai_engine
+
+logger = logging.getLogger(__name__)
 
 
 # ==================================================
@@ -19,7 +25,151 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+def _read_setting(section, name, environment_name):
+    value = os.environ.get(environment_name)
+    if value:
+        return value
+    try:
+        return st.secrets.get(section, {}).get(name)
+    except FileNotFoundError:
+        return None
+
+
+database_path = _read_setting("database", "path", "CAMPUS_DB_PATH")
+if database_path:
+    database.configure_database(database_path)
+
 database.create_table()
+
+admin_username = _read_setting("auth", "admin_username", "CAMPUS_ADMIN_USERNAME")
+admin_password = _read_setting("auth", "admin_password", "CAMPUS_ADMIN_PASSWORD")
+if bool(admin_username) != bool(admin_password):
+    raise RuntimeError(
+        "Configure both auth.admin_username and auth.admin_password to bootstrap an administrator."
+    )
+if admin_username and admin_password:
+    database.create_bootstrap_admin(admin_username, admin_password)
+
+
+SESSION_IDLE_SECONDS = 30 * 60
+SESSION_MAX_SECONDS = 12 * 60 * 60
+
+
+def _clear_authenticated_session():
+    for key in (
+        "authenticated_user_id",
+        "auth_session_started",
+        "auth_last_activity",
+    ):
+        st.session_state.pop(key, None)
+
+
+def _start_authenticated_session(account):
+    now = time.time()
+    st.session_state["authenticated_user_id"] = account["id"]
+    st.session_state["auth_session_started"] = now
+    st.session_state["auth_last_activity"] = now
+
+
+def _get_authenticated_user():
+    user_id = st.session_state.get("authenticated_user_id")
+    if user_id is None:
+        return None
+
+    now = time.time()
+    session_started = st.session_state.get("auth_session_started", now)
+    last_activity = st.session_state.get("auth_last_activity", now)
+    if (
+        now - last_activity > SESSION_IDLE_SECONDS
+        or now - session_started > SESSION_MAX_SECONDS
+    ):
+        _clear_authenticated_session()
+        return None
+
+    account = database.get_user_by_id(user_id)
+    if account is None:
+        _clear_authenticated_session()
+        return None
+
+    st.session_state["auth_last_activity"] = now
+    return account
+
+
+def _render_authentication():
+    st.title("🎓 CampusConnect AI")
+    st.subheader("Sign in to your campus account")
+    sign_in_tab, sign_up_tab = st.tabs(["Sign in", "Create account"])
+
+    with sign_in_tab:
+        with st.form("sign_in_form"):
+            username = st.text_input("Username", max_chars=30)
+            password = st.text_input(
+                "Password",
+                type="password",
+                max_chars=1024,
+            )
+            submitted = st.form_submit_button(
+                "Sign in",
+                use_container_width=True,
+            )
+        if submitted:
+            account = database.authenticate_user(username, password)
+            if account is None:
+                st.error("Sign-in failed. Check your credentials or try again later.")
+            else:
+                _start_authenticated_session(account)
+                st.rerun()
+
+    with sign_up_tab:
+        st.caption(
+            "Self-registration is available for students and faculty. "
+            "An administrator assigns privileged roles."
+        )
+        with st.form("sign_up_form"):
+            full_name = st.text_input("Full name", max_chars=120)
+            new_username = st.text_input(
+                "Choose a username",
+                max_chars=30,
+            )
+            role = st.selectbox("Account type", ["Student", "Faculty"])
+            new_password = st.text_input(
+                "Password (at least 12 characters)",
+                type="password",
+                max_chars=1024,
+            )
+            confirm_password = st.text_input(
+                "Confirm password",
+                type="password",
+                max_chars=1024,
+            )
+            submitted = st.form_submit_button(
+                "Create account",
+                use_container_width=True,
+            )
+        if submitted:
+            if new_password != confirm_password:
+                st.error("The passwords do not match.")
+            else:
+                try:
+                    user_id = database.create_user(
+                        full_name,
+                        new_username,
+                        new_password,
+                        role,
+                    )
+                except ValueError as error:
+                    st.error(str(error))
+                else:
+                    account = database.get_user_by_id(user_id)
+                    _start_authenticated_session(account)
+                    st.rerun()
+
+    if database.get_admin_count() == 0:
+        st.warning(
+            "No administrator is configured. Set auth.admin_username and "
+            "auth.admin_password in Streamlit secrets; the password must be "
+            "at least 16 characters."
+        )
 
 
 # ==================================================
@@ -56,6 +206,7 @@ def add_background():
             st.markdown(css, unsafe_allow_html=True)
 
         except Exception:
+            logger.exception("Unable to load the campus background image.")
             st.warning("Unable to load background image.")
 
     else:
@@ -260,6 +411,12 @@ p, li, label, .stMarkdown {
 """, unsafe_allow_html=True)
 
 
+user = _get_authenticated_user()
+if user is None:
+    _render_authentication()
+    st.stop()
+
+
 # ==================================================
 # 4. HEADER
 # ==================================================
@@ -281,16 +438,20 @@ st.divider()
 # ==================================================
 
 st.sidebar.title("🎓 CampusConnect AI")
+st.sidebar.write(f"Signed in as **{user['full_name']}** ({user['role']})")
+if st.sidebar.button("Sign out", use_container_width=True):
+    _clear_authenticated_session()
+    st.rerun()
 
 st.sidebar.markdown("### Main Menu")
 
+pages = ["Dashboard", "Submit Complaint", "View Complaints"]
+if user["role"] == "Admin":
+    pages.append("User Management")
+
 page = st.sidebar.selectbox(
     "Navigate to",
-    [
-        "Dashboard",
-        "Submit Complaint",
-        "View Complaints"
-    ]
+    pages
 )
 
 st.sidebar.divider()
@@ -310,7 +471,13 @@ st.sidebar.write(
 
 def load_complaints():
 
-    complaints = database.get_complaints()
+    can_view_all_complaints = user["role"] in {
+        "Admin",
+        "Maintenance Staff",
+    }
+    complaints = database.get_complaints(
+        None if can_view_all_complaints else user["id"]
+    )
 
     columns = [
         "ID",
@@ -513,20 +680,7 @@ elif page == "Submit Complaint":
 
         st.subheader("Personal Information")
 
-        name = st.text_input(
-            "Student / Faculty Name",
-            placeholder="Enter your full name"
-        )
-
-        role = st.selectbox(
-            "Select Your Role",
-            [
-                "Student",
-                "Faculty",
-                "Admin",
-                "Maintenance Staff"
-            ]
-        )
+        st.write(f"Submitting as **{user['full_name']}** ({user['role']}).")
 
         st.subheader("Complaint Information")
 
@@ -559,16 +713,16 @@ elif page == "Submit Complaint":
 
         if submitted:
 
-            if not name.strip() or not complaint.strip():
+            if not complaint.strip():
 
                 st.error(
-                    "Please fill in your name and complaint description."
+                    "Please fill in the complaint description."
                 )
 
             else:
 
                 full_complaint = (
-                    f"Role: {role}. "
+                    f"Role: {user['role']}. "
                     f"Location: {location}. "
                     f"Complaint: {complaint}"
                 )
@@ -584,7 +738,8 @@ elif page == "Submit Complaint":
                     priority = normalize_priority(priority)
 
                     database.add_complaint(
-                        name,
+                        user["id"],
+                        user["full_name"],
                         full_complaint,
                         category,
                         priority
@@ -631,11 +786,9 @@ elif page == "Submit Complaint":
 
                     st.balloons()
 
-                except Exception as error:
-
-                    st.error(
-                        f"Complaint submission failed: {error}"
-                    )
+                except Exception:
+                    logger.exception("Complaint submission failed.")
+                    st.error("Complaint submission failed. Please try again.")
 
 
 # ==================================================
@@ -788,9 +941,68 @@ elif page == "View Complaints":
             int(priority_counts["Low"])
         )
 
+elif page == "User Management":
+
+    if user["role"] != "Admin":
+        st.error("Administrator access is required.")
+        st.stop()
+
+    st.header("👥 User Management")
+    st.write("Assign or change account roles. Only administrators can access this page.")
+
+    users = database.get_users()
+    if users.empty:
+        st.info("No user accounts are available.")
+    else:
+        st.dataframe(
+            users[["id", "full_name", "username", "role", "is_active", "created_at"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        accounts = users.to_dict("records")
+        account_ids = [account["id"] for account in accounts]
+        selected_user_id = st.selectbox(
+            "Account",
+            account_ids,
+            format_func=lambda account_id: next(
+                f"{account['full_name']} ({account['username']})"
+                for account in accounts
+                if account["id"] == account_id
+            ),
+        )
+        selected_account = next(
+            account
+            for account in accounts
+            if account["id"] == selected_user_id
+        )
+        roles = sorted(database.VALID_ROLES)
+        current_role_index = roles.index(selected_account["role"])
+
+        with st.form("user_role_form"):
+            new_role = st.selectbox(
+                "Role",
+                roles,
+                index=current_role_index,
+            )
+            role_submitted = st.form_submit_button("Update role")
+
+        if role_submitted:
+            try:
+                database.update_user_role(
+                    user["id"],
+                    selected_user_id,
+                    new_role,
+                )
+            except (PermissionError, ValueError) as error:
+                st.error(str(error))
+            else:
+                st.success("User role updated.")
+                st.rerun()
+
 
 # ==================================================
-# 11. FOOTER
+# 12. FOOTER
 # ==================================================
 
 st.markdown("""
