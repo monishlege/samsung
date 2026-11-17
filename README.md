@@ -26,6 +26,16 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 ```
 
+## Deploy on Streamlit Community Cloud
+
+This project uses Streamlit and should be deployed on Streamlit Community Cloud, not Vercel.
+
+1. Sign in to [Streamlit Community Cloud](https://share.streamlit.io/).
+2. Select **Create app** and choose the `monishlege/samsung` repository and `main` branch.
+3. Set the main file path to `app.py`, then deploy.
+
+Dependencies are listed in `requirements.txt`. The SQLite database is created on startup; data stored on a hosted instance may not persist across restarts.
+
 ## Demo accounts
 | Role | Username | Password |
 |---|---|---|
