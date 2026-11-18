@@ -699,7 +699,7 @@ def add_complaint(
     if not isinstance(anonymous, bool):
         raise ValueError("Anonymous selection must be true or false.")
     with _connection() as connection:
-        actor = _require_actor(connection, actor_id, VALID_ROLES)
+        actor = _require_actor(connection, actor_id, {"Student"})
         connection.execute(
             """
             INSERT INTO complaints (

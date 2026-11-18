@@ -547,7 +547,10 @@ if st.sidebar.button("Sign out", use_container_width=True):
 
 st.sidebar.markdown("### Main Menu")
 
-pages = ["Dashboard", "Submit Complaint", "View Complaints"]
+pages = ["Dashboard"]
+if user["role"] == "Student":
+    pages.append("Submit Complaint")
+pages.append("View Complaints")
 if user["role"] == "Admin":
     pages.append("Admin Panel")
 
@@ -998,6 +1001,13 @@ if page == "Dashboard":
 # ==================================================
 
 elif page == "Submit Complaint":
+
+    if (
+        user["role"] != "Student"
+        or st.session_state.get("authenticated_role") != "Student"
+    ):
+        st.error("Only Student accounts can submit complaints.")
+        st.stop()
 
     st.header("📝 Submit a Complaint")
 

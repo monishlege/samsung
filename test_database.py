@@ -382,6 +382,22 @@ class DatabaseTests(unittest.TestCase):
             "Medium",
             "Classroom",
         )
+        with self.assertRaises(PermissionError):
+            database.add_complaint(
+                staff_id,
+                "Staff-submitted complaint",
+                "General",
+                "Low",
+                "Library",
+            )
+        with self.assertRaises(PermissionError):
+            database.add_complaint(
+                admin_id,
+                "Admin-submitted complaint",
+                "General",
+                "Low",
+                "Library",
+            )
         complaint_id = int(
             database.get_complaints(student_id).iloc[0]["id"]
         )

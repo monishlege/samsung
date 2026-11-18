@@ -5,7 +5,7 @@ A beginner-friendly campus complaint and facilities management dashboard built w
 ## Features
 - Roles: Student, Maintenance Staff and Admin
 - Secure sign-in, student registration and admin role management
-- Complaint submission, location/category filtering, and Pending/In Progress/Resolved tracking
+- Student-only complaint submission, location/category filtering, and Pending/In Progress/Resolved tracking
 - Optional anonymous display name for complaints; account ownership remains private for ticket access
 - Admin account and complaint deletion with an audit log and last-admin protection
 - Maintenance Staff resolution submissions with a required completion photo and browser GPS geotag
