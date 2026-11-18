@@ -65,6 +65,7 @@ SESSION_MAX_SECONDS = 12 * 60 * 60
 def _clear_authenticated_session():
     for key in (
         "authenticated_user_id",
+        "authenticated_role",
         "auth_session_started",
         "auth_last_activity",
     ):
@@ -74,6 +75,7 @@ def _clear_authenticated_session():
 def _start_authenticated_session(account):
     now = time.time()
     st.session_state["authenticated_user_id"] = account["id"]
+    st.session_state["authenticated_role"] = account["role"]
     st.session_state["auth_session_started"] = now
     st.session_state["auth_last_activity"] = now
 
@@ -94,7 +96,11 @@ def _get_authenticated_user():
         return None
 
     account = database.get_user_by_id(user_id)
-    if account is None:
+    if (
+        account is None
+        or account["role"] not in database.VALID_ROLES
+        or st.session_state.get("authenticated_role") != account["role"]
+    ):
         _clear_authenticated_session()
         return None
 
@@ -129,8 +135,8 @@ def _render_authentication():
 
     with sign_up_tab:
         st.caption(
-            "Self-registration is available for students and faculty. "
-            "An administrator assigns privileged roles."
+            "Self-registration is available for students. "
+            "An administrator assigns Maintenance Staff and Admin roles."
         )
         with st.form("sign_up_form"):
             full_name = st.text_input("Full name", max_chars=120)
@@ -138,7 +144,7 @@ def _render_authentication():
                 "Choose a username",
                 max_chars=30,
             )
-            role = st.selectbox("Account type", ["Student", "Faculty"])
+            role = st.selectbox("Account type", ["Student"])
             new_password = st.text_input(
                 "Password (at least 12 characters)",
                 type="password",
@@ -293,6 +299,11 @@ p, li, label, .stMarkdown {
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2 {
     color: #60A5FA !important;
+}
+
+[data-testid="stSidebar"] h1 {
+    font-size: 1.4rem !important;
+    white-space: nowrap;
 }
 
 /* Metric cards */
@@ -538,12 +549,18 @@ st.sidebar.markdown("### Main Menu")
 
 pages = ["Dashboard", "Submit Complaint", "View Complaints"]
 if user["role"] == "Admin":
-    pages.append("User Management")
+    pages.append("Admin Panel")
 
 page = st.sidebar.selectbox(
     "Navigate to",
     pages
 )
+if st.session_state.get("authenticated_role") != user["role"]:
+    _clear_authenticated_session()
+    st.rerun()
+if page == "Admin Panel" and user["role"] != "Admin":
+    st.error("Administrator access is required.")
+    st.stop()
 
 st.sidebar.divider()
 
@@ -561,14 +578,7 @@ st.sidebar.write(
 # ==================================================
 
 def load_complaints():
-
-    can_view_all_complaints = user["role"] in {
-        "Admin",
-        "Maintenance Staff",
-    }
-    complaints = database.get_complaints(
-        None if can_view_all_complaints else user["id"]
-    )
+    complaints = database.get_complaints(user["id"])
 
     columns = [
         "ID",
@@ -576,7 +586,8 @@ def load_complaints():
         "Complaint",
         "Category",
         "Priority",
-        "Status"
+        "Status",
+        "Location",
     ]
 
     if complaints is None or len(complaints) == 0:
@@ -586,7 +597,7 @@ def load_complaints():
 
         df = complaints.copy()
 
-        if len(df.columns) == 6:
+        if len(df.columns) == 7:
             df.columns = columns
 
         return df
@@ -719,6 +730,72 @@ def render_resolution_queue(df):
                     )
 
 
+def render_status_update(df):
+    if user["role"] not in {"Admin", "Maintenance Staff"} or df.empty:
+        return
+
+    if user["role"] == "Maintenance Staff":
+        df = df[
+            ~df["Status"].astype(str).str.strip().str.lower().eq("resolved")
+        ]
+        if df.empty:
+            return
+
+    st.subheader("🔄 Update Complaint Status")
+    complaint_ids = df["ID"].astype(int).tolist()
+    complaint_labels = {
+        int(row["ID"]): (
+            f"#{int(row['ID'])} — {row['Category']} · {row['Status']}"
+        )
+        for _, row in df.iterrows()
+    }
+    selected_id = st.selectbox(
+        "Select a complaint to update",
+        complaint_ids,
+        format_func=lambda complaint_id: complaint_labels[complaint_id],
+        key="status_update_complaint",
+    )
+    selected_complaint = df[
+        df["ID"].astype(int) == selected_id
+    ].iloc[0]
+    current_status = str(selected_complaint["Status"])
+    if user["role"] == "Maintenance Staff":
+        status_options = ["In Progress"]
+    else:
+        status_options = ["Pending", "In Progress", "Resolved"]
+    current_index = (
+        status_options.index(current_status)
+        if current_status in status_options
+        else 0
+    )
+
+    with st.form(f"status_update_form_{selected_id}"):
+        new_status = st.selectbox(
+            "New status",
+            status_options,
+            index=current_index,
+        )
+        resolution_note = st.text_area(
+            "Resolution note (required when marking Resolved)",
+            max_chars=1000,
+        )
+        submitted = st.form_submit_button("Update status")
+
+    if submitted:
+        try:
+            database.update_complaint_status(
+                user["id"],
+                selected_id,
+                new_status,
+                resolution_note,
+            )
+        except (PermissionError, ValueError) as error:
+            st.error(str(error))
+        else:
+            st.success("Complaint status updated.")
+            st.rerun()
+
+
 def render_resolution_evidence(df):
     resolved_complaints = df[
         df["Status"].astype(str).str.strip().str.lower().eq("resolved")
@@ -734,6 +811,11 @@ def render_resolution_evidence(df):
                 user["id"],
                 complaint_id,
             )
+            if evidence and evidence["resolution_note"]:
+                st.write(f"Resolution note: {evidence['resolution_note']}")
+            if evidence and evidence["admin_override"]:
+                st.info("This complaint was resolved by an administrator override.")
+                continue
             if (
                 not evidence
                 or not evidence["image"]
@@ -743,7 +825,7 @@ def render_resolution_evidence(df):
             ):
                 st.info("No completion photo or geotag was recorded for this complaint.")
                 continue
-            if evidence["notes"]:
+            if evidence["notes"] and not evidence["admin_override"]:
                 st.write(f"Maintenance notes: {evidence['notes']}")
             if evidence["ai_feedback"]:
                 st.caption(f"AI review: {evidence['ai_feedback']}")
@@ -834,7 +916,7 @@ if page == "Dashboard":
 
     col1, col2, col3, col4 = st.columns(4)
 
-    col1.metric("Total Complaints", total)
+    col1.metric("Total Unresolved", int(pending + progress))
     col2.metric("Pending", int(pending))
     col3.metric("In Progress", int(progress))
     col4.metric("Resolved", int(resolved))
@@ -989,10 +1071,10 @@ elif page == "Submit Complaint":
 
                     database.add_complaint(
                         user["id"],
-                        user["full_name"],
                         full_complaint,
                         category,
-                        priority
+                        priority,
+                        location,
                     )
 
                     st.success(
@@ -1051,12 +1133,13 @@ elif page == "View Complaints":
 
     st.write(
         "View and filter complaints submitted by "
-        "students and faculty members."
+        "campus community members."
     )
 
     df = load_complaints()
 
     render_resolution_queue(df)
+    render_status_update(df)
 
     if df.empty:
 
@@ -1070,15 +1153,16 @@ elif page == "View Complaints":
 
         st.subheader("🔎 Filter Complaints")
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
 
         with col1:
 
             status_options = [
-                "All"
-            ] + sorted(
-                df["Status"].dropna().astype(str).unique().tolist()
-            )
+                "All",
+                "Pending",
+                "In Progress",
+                "Resolved",
+            ]
 
             selected_status = st.selectbox(
                 "Complaint Status",
@@ -1099,6 +1183,19 @@ elif page == "View Complaints":
             )
 
         with col3:
+
+            location_options = [
+                "All"
+            ] + sorted(
+                df["Location"].dropna().astype(str).unique().tolist()
+            )
+
+            selected_location = st.selectbox(
+                "Complaint Location",
+                location_options,
+            )
+
+        with col4:
 
             priority_options = [
                 "All",
@@ -1124,6 +1221,12 @@ elif page == "View Complaints":
 
             filtered_df = filtered_df[
                 filtered_df["Category"] == selected_category
+            ]
+
+        if selected_location != "All":
+
+            filtered_df = filtered_df[
+                filtered_df["Location"] == selected_location
             ]
 
         if selected_priority != "All":
@@ -1197,64 +1300,141 @@ elif page == "View Complaints":
             int(priority_counts["Low"])
         )
 
-elif page == "User Management":
+elif page == "Admin Panel":
 
-    if user["role"] != "Admin":
+    if (
+        user["role"] != "Admin"
+        or st.session_state.get("authenticated_role") != "Admin"
+    ):
         st.error("Administrator access is required.")
         st.stop()
 
-    st.header("👥 User Management")
-    st.write("Assign or change account roles. Only administrators can access this page.")
+    st.header("👥 Manage Users & Records")
+    st.write(
+        "Manage accounts and remove invalid records. Deletions require "
+        "confirmation and are recorded in the audit log."
+    )
 
-    users = database.get_users()
+    users = database.get_users(user["id"])
+    manageable_users = users[users["id"] != user["id"]]
     if users.empty:
         st.info("No user accounts are available.")
     else:
         st.dataframe(
-            users[["id", "full_name", "username", "role", "is_active", "created_at"]],
+            manageable_users[
+                ["id", "full_name", "username", "role", "is_active", "created_at"]
+            ],
             use_container_width=True,
             hide_index=True,
         )
 
-        accounts = users.to_dict("records")
-        account_ids = [account["id"] for account in accounts]
-        selected_user_id = st.selectbox(
-            "Account",
-            account_ids,
-            format_func=lambda account_id: next(
-                f"{account['full_name']} ({account['username']})"
+        accounts = manageable_users.to_dict("records")
+        if accounts:
+            account_ids = [account["id"] for account in accounts]
+            selected_user_id = st.selectbox(
+                "Account to manage",
+                account_ids,
+                format_func=lambda account_id: next(
+                    f"{account['full_name']} ({account['username']})"
+                    for account in accounts
+                    if account["id"] == account_id
+                ),
+            )
+            selected_account = next(
+                account
                 for account in accounts
-                if account["id"] == account_id
+                if account["id"] == selected_user_id
+            )
+            roles = sorted(database.VALID_ROLES)
+            current_role_index = roles.index(selected_account["role"])
+
+            with st.form("user_role_form"):
+                new_role = st.selectbox(
+                    "Role",
+                    roles,
+                    index=current_role_index,
+                )
+                role_submitted = st.form_submit_button("Update role")
+
+            if role_submitted:
+                try:
+                    database.update_user_role(
+                        user["id"],
+                        selected_user_id,
+                        new_role,
+                    )
+                except (PermissionError, ValueError) as error:
+                    st.error(str(error))
+                else:
+                    st.success("User role updated.")
+                    st.rerun()
+
+            with st.form("delete_user_form"):
+                confirm_user_deletion = st.checkbox(
+                    f"Confirm deletion of {selected_account['username']}"
+                )
+                delete_user_submitted = st.form_submit_button("Delete Account")
+
+            if delete_user_submitted:
+                if not confirm_user_deletion:
+                    st.error("Confirm the account deletion before continuing.")
+                else:
+                    try:
+                        database.delete_user(user["id"], selected_user_id)
+                    except (PermissionError, ValueError) as error:
+                        st.error(str(error))
+                    else:
+                        st.success(
+                            "Account deleted. Existing complaints are retained "
+                            "under the name 'Deleted User'."
+                        )
+                        st.rerun()
+
+    st.divider()
+    st.subheader("🗑️ Delete Invalid Complaints")
+    all_complaints = database.get_complaints(user["id"])
+    if all_complaints.empty:
+        st.info("There are no complaints to delete.")
+    else:
+        complaint_ids = all_complaints["id"].astype(int).tolist()
+        selected_complaint_id = st.selectbox(
+            "Complaint to delete",
+            complaint_ids,
+            format_func=lambda complaint_id: (
+                f"#{complaint_id} — "
+                f"{all_complaints.loc[all_complaints['id'] == complaint_id, 'category'].iloc[0]}"
             ),
         )
-        selected_account = next(
-            account
-            for account in accounts
-            if account["id"] == selected_user_id
-        )
-        roles = sorted(database.VALID_ROLES)
-        current_role_index = roles.index(selected_account["role"])
-
-        with st.form("user_role_form"):
-            new_role = st.selectbox(
-                "Role",
-                roles,
-                index=current_role_index,
+        with st.form("delete_complaint_form"):
+            confirm_complaint_deletion = st.checkbox(
+                f"Confirm permanent deletion of complaint #{selected_complaint_id}"
             )
-            role_submitted = st.form_submit_button("Update role")
+            delete_complaint_submitted = st.form_submit_button(
+                "Permanently Delete Complaint"
+            )
 
-        if role_submitted:
-            try:
-                database.update_user_role(
-                    user["id"],
-                    selected_user_id,
-                    new_role,
-                )
-            except (PermissionError, ValueError) as error:
-                st.error(str(error))
+        if delete_complaint_submitted:
+            if not confirm_complaint_deletion:
+                st.error("Confirm the complaint deletion before continuing.")
             else:
-                st.success("User role updated.")
-                st.rerun()
+                try:
+                    database.delete_complaint(
+                        user["id"],
+                        selected_complaint_id,
+                    )
+                except (PermissionError, ValueError) as error:
+                    st.error(str(error))
+                else:
+                    st.success("Complaint deleted and audit log recorded.")
+                    st.rerun()
+
+    st.divider()
+    st.subheader("🧾 Recent Audit Log")
+    audit_logs = database.get_audit_logs(user["id"])
+    if audit_logs.empty:
+        st.info("No administrative actions have been recorded.")
+    else:
+        st.dataframe(audit_logs, use_container_width=True, hide_index=True)
 
 
 # ==================================================
@@ -1265,6 +1445,7 @@ st.markdown("""
 <div class="footer">
     <h3>🎓 CampusConnect AI</h3>
     <p>Smart Campus | AI-Powered Complaint Management</p>
+    <p>Developed by NULL_MINDS🧠</p>
     <p>Developed using Python, Streamlit, SQLite and AI</p>
 </div>
 """, unsafe_allow_html=True)

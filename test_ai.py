@@ -52,6 +52,20 @@ class ComplaintAnalysisTests(unittest.TestCase):
             "High",
         )
 
+    def test_urgency_words_alone_do_not_escalate_minor_issues(self):
+        self.assertEqual(
+            analyze_complaint(
+                "URGENT EMERGENCY: the classroom fan squeaks occasionally"
+            )[1],
+            "Medium",
+        )
+        self.assertEqual(
+            analyze_complaint(
+                "Emergency emergency emergency: minor issue"
+            )[1],
+            "Low",
+        )
+
     def test_resolution_review_requires_clear_completion(self):
         self.assertEqual(
             review_resolution("Replaced the fan; it works now."),

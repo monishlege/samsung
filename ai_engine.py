@@ -34,9 +34,9 @@ CATEGORY_KEYWORDS = {
 
 HIGH_PRIORITY_KEYWORDS = [
     "fire", "smoke", "electric shock", "live wire", "short circuit",
-    "gas leak", "explosion", "accident", "emergency", "injury", "injured",
-    "bleeding", "unconscious", "harassment", "assault", "threat",
-    "unsafe", "danger", "flooding", "collapse", "collapsing",
+    "gas leak", "explosion", "accident", "injury", "injured", "bleeding",
+    "unconscious", "harassment", "assault", "threat", "flooding",
+    "collapse", "collapsing",
     "falling ceiling",
 ]
 

@@ -3,9 +3,10 @@
 A beginner-friendly campus complaint and facilities management dashboard built with Python, Streamlit and SQLite.
 
 ## Features
-- Roles: Student, Faculty, Admin and Maintenance Staff
-- Secure sign-in, student/faculty registration and admin role management
-- Complaint submission and status tracking
+- Roles: Student, Maintenance Staff and Admin
+- Secure sign-in, student registration and admin role management
+- Complaint submission, location/category filtering, and Pending/In Progress/Resolved tracking
+- Admin account and complaint deletion with an audit log and last-admin protection
 - Maintenance Staff resolution submissions with a required completion photo and browser GPS geotag
 - Local AI review of resolution notes; a complaint is marked Resolved only when the notes clearly confirm completion
 - Automatic local complaint categorization and High/Medium/Low priority assessment from complaint text
@@ -46,7 +47,7 @@ admin_username = "campusadmin"
 admin_password = "replace-with-a-unique-password-of-at-least-16-characters"
 ```
 
-The first configured admin is created only when the database has no administrator. Do not commit credentials or a local `secrets.toml` file. Students and faculty can create accounts from the sign-in page; an administrator assigns Admin or Maintenance Staff roles.
+The first configured admin is created only when the database has no administrator. Do not commit credentials or a local `secrets.toml` file. Students can create accounts from the sign-in page; an administrator assigns Admin or Maintenance Staff roles. Existing Faculty accounts are migrated to Student during database initialization.
 
 ## Sign-in and database
 

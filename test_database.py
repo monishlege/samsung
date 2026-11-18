@@ -120,17 +120,26 @@ class DatabaseTests(unittest.TestCase):
         )
         database.add_complaint(
             first_user_id,
-            "First Student",
             "Broken fan",
             "Electrical",
             "Medium",
+            "Classroom",
         )
 
         first_complaints = database.get_complaints(first_user_id)
         second_complaints = database.get_complaints(second_user_id)
-        all_complaints = database.get_complaints()
+        database.create_bootstrap_admin(
+            "campusadmin",
+            "a-unique-bootstrap-password",
+        )
+        admin_id = database.authenticate_user(
+            "campusadmin",
+            "a-unique-bootstrap-password",
+        )["id"]
+        all_complaints = database.get_complaints(admin_id)
 
         self.assertEqual(first_complaints["complaint"].tolist(), ["Broken fan"])
+        self.assertEqual(first_complaints["location"].tolist(), ["Classroom"])
         self.assertTrue(second_complaints.empty)
         self.assertEqual(len(all_complaints), 2)
 
@@ -140,11 +149,21 @@ class DatabaseTests(unittest.TestCase):
                 row[1]
                 for row in connection.execute("PRAGMA table_info(complaints)")
             }
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
             legacy_complaint = connection.execute(
                 "SELECT complaint, user_id FROM complaints WHERE id = 1"
             ).fetchone()
 
         self.assertIn("user_id", columns)
+        self.assertIn("location", columns)
+        self.assertIn("resolution_note", columns)
+        self.assertIn("updated_at", columns)
+        self.assertIn("audit_logs", tables)
         self.assertIn("resolution_image", columns)
         self.assertIn("resolution_latitude", columns)
         self.assertIn("resolution_longitude", columns)
@@ -174,10 +193,10 @@ class DatabaseTests(unittest.TestCase):
         database.update_user_role(admin_id, staff_id, "Maintenance Staff")
         database.add_complaint(
             owner_id,
-            "Complaint Owner",
             "Broken classroom fan",
             "Electrical",
             "Medium",
+            "Classroom",
         )
         complaint_id = int(database.get_complaints(owner_id).iloc[0]["id"])
 
@@ -298,7 +317,132 @@ class DatabaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             database.update_user_role(admin_id, admin_id, "Student")
         with self.assertRaises(PermissionError):
-            database.update_user_role(student_id, admin_id, "Faculty")
+            database.update_user_role(student_id, admin_id, "Maintenance Staff")
+        with self.assertRaises(ValueError):
+            database.delete_user(admin_id, admin_id)
+
+    def test_staff_status_flow_and_admin_resolution_override_are_audited(self):
+        database.create_bootstrap_admin(
+            "campusadmin",
+            "a-unique-bootstrap-password",
+        )
+        admin_id = database.authenticate_user(
+            "campusadmin",
+            "a-unique-bootstrap-password",
+        )["id"]
+        student_id = database.create_user(
+            "Complaint Owner",
+            "complaint.owner",
+            "a-long-and-unique-test-password",
+            "Student",
+        )
+        staff_id = database.create_user(
+            "Maintenance Worker",
+            "maintenance.worker",
+            "another-long-unique-test-password",
+            "Student",
+        )
+        database.update_user_role(admin_id, staff_id, "Maintenance Staff")
+        database.add_complaint(
+            student_id,
+            "Broken classroom fan",
+            "Electrical",
+            "Medium",
+            "Classroom",
+        )
+        complaint_id = int(
+            database.get_complaints(student_id).iloc[0]["id"]
+        )
+
+        with self.assertRaises(PermissionError):
+            database.get_users(student_id)
+        with self.assertRaises(PermissionError):
+            database.update_complaint_status(
+                student_id,
+                complaint_id,
+                "In Progress",
+            )
+        database.update_complaint_status(
+            staff_id,
+            complaint_id,
+            "In Progress",
+        )
+        with self.assertRaises(PermissionError):
+            database.update_complaint_status(
+                staff_id,
+                complaint_id,
+                "Resolved",
+                "Repaired the fan.",
+            )
+        with self.assertRaises(ValueError):
+            database.update_complaint_status(
+                admin_id,
+                complaint_id,
+                "Resolved",
+            )
+
+        database.update_complaint_status(
+            admin_id,
+            complaint_id,
+            "Resolved",
+            "Administrator confirmed the repair.",
+        )
+        complaint = database.get_complaints(admin_id).iloc[0]
+        self.assertEqual(complaint["status"], "Resolved")
+        evidence = database.get_complaint_resolution(admin_id, complaint_id)
+        self.assertTrue(evidence["admin_override"])
+        self.assertEqual(
+            evidence["resolution_note"],
+            "Administrator confirmed the repair.",
+        )
+        audit_logs = database.get_audit_logs(admin_id)
+        self.assertEqual(audit_logs.iloc[0]["action_type"], "forced_status_override")
+
+    def test_admin_deletion_retains_complaint_and_writes_audit_log(self):
+        database.create_bootstrap_admin(
+            "campusadmin",
+            "a-unique-bootstrap-password",
+        )
+        admin_id = database.authenticate_user(
+            "campusadmin",
+            "a-unique-bootstrap-password",
+        )["id"]
+        student_id = database.create_user(
+            "Test Student",
+            "test.student",
+            "a-long-and-unique-test-password",
+            "Student",
+        )
+        database.add_complaint(
+            student_id,
+            "Broken light",
+            "Electrical",
+            "Medium",
+            "Library",
+        )
+
+        with self.assertRaises(PermissionError):
+            database.delete_user(student_id, student_id)
+        database.delete_user(admin_id, student_id)
+
+        complaints = database.get_complaints(admin_id)
+        retained = complaints[complaints["complaint"] == "Broken light"]
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained.iloc[0]["name"], "Deleted User")
+        with self.assertRaises(PermissionError):
+            database.get_complaints(student_id)
+        self.assertEqual(
+            database.get_audit_logs(admin_id).iloc[0]["action_type"],
+            "user_deletion",
+        )
+        complaint_id = int(retained.iloc[0]["id"])
+        with self.assertRaises(PermissionError):
+            database.delete_complaint(student_id, complaint_id)
+        database.delete_complaint(admin_id, complaint_id)
+        self.assertEqual(
+            database.get_audit_logs(admin_id).iloc[0]["action_type"],
+            "complaint_deletion",
+        )
 
 
 if __name__ == "__main__":

@@ -28,11 +28,10 @@ LOGIN_LOCK_SECONDS = 15 * 60
 MAX_LOGIN_FAILURES = 5
 VALID_ROLES = {
     "Student",
-    "Faculty",
     "Admin",
     "Maintenance Staff",
 }
-SELF_SIGNUP_ROLES = {"Student", "Faculty"}
+SELF_SIGNUP_ROLES = {"Student"}
 
 def configure_database(path):
     global DB_NAME
@@ -82,6 +81,9 @@ def create_table():
                 category TEXT,
                 priority TEXT,
                 status TEXT DEFAULT 'Pending',
+                location TEXT DEFAULT 'Unknown',
+                resolution_note TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 user_id INTEGER REFERENCES users(id),
                 resolution_image BLOB,
                 resolution_latitude REAL,
@@ -94,7 +96,9 @@ def create_table():
                 resolution_submitted_by INTEGER REFERENCES users(id),
                 resolution_submitted_at TEXT,
                 resolved_by INTEGER REFERENCES users(id),
-                resolved_at TEXT
+                resolved_at TEXT,
+                resolution_admin_override INTEGER NOT NULL DEFAULT 0
+                    CHECK (resolution_admin_override IN (0, 1))
             )
         """)
         complaint_columns = {
@@ -107,6 +111,10 @@ def create_table():
                 "INTEGER REFERENCES users(id)"
             )
         resolution_columns = {
+            "status": "TEXT DEFAULT 'Pending'",
+            "location": "TEXT DEFAULT 'Unknown'",
+            "resolution_note": "TEXT",
+            "updated_at": "TEXT",
             "resolution_image": "BLOB",
             "resolution_latitude": "REAL",
             "resolution_longitude": "REAL",
@@ -121,6 +129,10 @@ def create_table():
             "resolution_submitted_at": "TEXT",
             "resolved_by": "INTEGER REFERENCES users(id)",
             "resolved_at": "TEXT",
+            "resolution_admin_override": (
+                "INTEGER NOT NULL DEFAULT 0 CHECK "
+                "(resolution_admin_override IN (0, 1))"
+            ),
         }
         for column_name, column_type in resolution_columns.items():
             if column_name not in complaint_columns:
@@ -128,22 +140,124 @@ def create_table():
                     f"ALTER TABLE complaints ADD COLUMN "
                     f"{column_name} {column_type}"
                 )
+        connection.execute(
+            "UPDATE users SET role = 'Student' WHERE role = 'Faculty'"
+        )
+        connection.execute("""
+            CREATE TRIGGER IF NOT EXISTS users_valid_role_insert
+            BEFORE INSERT ON users
+            WHEN NEW.role NOT IN ('Student', 'Maintenance Staff', 'Admin')
+            BEGIN
+                SELECT RAISE(ABORT, 'Invalid account role.');
+            END
+        """)
+        connection.execute("""
+            CREATE TRIGGER IF NOT EXISTS users_valid_role_update
+            BEFORE UPDATE OF role ON users
+            WHEN NEW.role NOT IN ('Student', 'Maintenance Staff', 'Admin')
+            BEGIN
+                SELECT RAISE(ABORT, 'Invalid account role.');
+            END
+        """)
+        connection.execute("""
+            UPDATE complaints
+            SET status = CASE lower(trim(status))
+                WHEN 'pending' THEN 'Pending'
+                WHEN 'in progress' THEN 'In Progress'
+                WHEN 'resolved' THEN 'Resolved'
+                ELSE 'Pending'
+            END
+                WHERE status IS NULL OR status != CASE lower(trim(status))
+                    WHEN 'pending' THEN 'Pending'
+                    WHEN 'in progress' THEN 'In Progress'
+                    WHEN 'resolved' THEN 'Resolved'
+                    ELSE 'Pending'
+                END
+        """)
+        connection.execute(
+            "UPDATE complaints SET location = 'Unknown' "
+            "WHERE location IS NULL OR trim(location) = ''"
+        )
+        connection.execute(
+            "UPDATE complaints SET resolution_note = resolution_notes "
+            "WHERE resolution_note IS NULL AND resolution_notes IS NOT NULL"
+        )
+        connection.execute(
+            "UPDATE complaints SET updated_at = CURRENT_TIMESTAMP "
+            "WHERE updated_at IS NULL OR trim(updated_at) = ''"
+        )
         connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_complaints_user_id
             ON complaints(user_id)
         """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_username TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                target_details TEXT NOT NULL,
+                timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         connection.execute(
-            "DROP TRIGGER IF EXISTS "
-            "complaints_require_resolution_evidence_insert"
+            "DROP TRIGGER IF EXISTS complaints_require_resolution_evidence_insert"
         )
         connection.execute(
-            "DROP TRIGGER IF EXISTS "
-            "complaints_require_resolution_evidence_update"
+            "DROP TRIGGER IF EXISTS complaints_require_resolution_evidence_update"
+        )
+        connection.execute(
+            "DROP TRIGGER IF EXISTS complaints_valid_status_insert"
+        )
+        connection.execute(
+            "DROP TRIGGER IF EXISTS complaints_valid_status_update"
+        )
+        connection.execute(
+            "DROP TRIGGER IF EXISTS complaints_set_updated_at"
         )
         connection.execute("""
+            CREATE TRIGGER complaints_valid_status_insert
+            BEFORE INSERT ON complaints
+            WHEN NEW.status IS NULL OR NEW.status NOT IN
+                ('Pending', 'In Progress', 'Resolved')
+            BEGIN
+                SELECT RAISE(ABORT, 'Invalid complaint status.');
+            END
+        """)
+        connection.execute("""
+            CREATE TRIGGER complaints_valid_status_update
+            BEFORE UPDATE OF status ON complaints
+            WHEN NEW.status IS NULL OR NEW.status NOT IN
+                ('Pending', 'In Progress', 'Resolved')
+            BEGIN
+                SELECT RAISE(ABORT, 'Invalid complaint status.');
+            END
+        """)
+        connection.execute("""
+            CREATE TRIGGER complaints_set_updated_at
+            AFTER UPDATE ON complaints
+            WHEN NEW.updated_at = OLD.updated_at
+            BEGIN
+                UPDATE complaints
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = NEW.id;
+            END
+        """)
+        connection.execute(
+            """
             CREATE TRIGGER IF NOT EXISTS complaints_require_resolution_evidence_insert
             BEFORE INSERT ON complaints
-            WHEN lower(NEW.status) = 'resolved' AND (
+            WHEN NEW.status = 'Resolved' AND (
+                (NEW.resolution_admin_override = 1 AND (
+                    NEW.resolution_note IS NULL
+                    OR length(trim(NEW.resolution_note)) = 0
+                    OR (NEW.resolved_by IS NOT NULL AND NOT EXISTS (
+                        SELECT 1 FROM users
+                        WHERE id = NEW.resolved_by AND role = 'Admin'
+                            AND is_active = 1
+                    ))
+                ))
+                OR
+                (NEW.resolution_admin_override = 0 AND (
                 NEW.resolution_image IS NULL
                 OR length(NEW.resolution_image) = 0
                 OR NEW.resolution_latitude IS NULL
@@ -154,9 +268,11 @@ def create_table():
                 OR NEW.resolution_accuracy < 0
                 OR NEW.resolution_notes IS NULL
                 OR length(trim(NEW.resolution_notes)) = 0
+                OR NEW.resolution_note IS NULL
+                OR length(trim(NEW.resolution_note)) = 0
                 OR NEW.resolution_ai_confirmed != 1
-                OR NEW.resolved_by IS NULL
                 OR NEW.resolved_at IS NULL
+                ))
             )
             BEGIN
                 SELECT RAISE(
@@ -164,15 +280,28 @@ def create_table():
                     'Resolution requires AI confirmation, photo, and GPS evidence.'
                 );
             END
-        """)
+        """
+        )
         connection.execute("""
             CREATE TRIGGER IF NOT EXISTS complaints_require_resolution_evidence_update
             BEFORE UPDATE OF
                 status, resolution_image, resolution_latitude,
                 resolution_longitude, resolution_accuracy, resolution_notes,
-                resolution_ai_confirmed, resolved_by, resolved_at
+                resolution_note, resolution_ai_confirmed, resolved_by,
+                resolved_at, resolution_admin_override
             ON complaints
-            WHEN lower(NEW.status) = 'resolved' AND (
+            WHEN NEW.status = 'Resolved' AND (
+                (NEW.resolution_admin_override = 1 AND (
+                    NEW.resolution_note IS NULL
+                    OR length(trim(NEW.resolution_note)) = 0
+                    OR (NEW.resolved_by IS NOT NULL AND NOT EXISTS (
+                        SELECT 1 FROM users
+                        WHERE id = NEW.resolved_by AND role = 'Admin'
+                            AND is_active = 1
+                    ))
+                ))
+                OR
+                (NEW.resolution_admin_override = 0 AND (
                 NEW.resolution_image IS NULL
                 OR length(NEW.resolution_image) = 0
                 OR NEW.resolution_latitude IS NULL
@@ -183,9 +312,11 @@ def create_table():
                 OR NEW.resolution_accuracy < 0
                 OR NEW.resolution_notes IS NULL
                 OR length(trim(NEW.resolution_notes)) = 0
+                OR NEW.resolution_note IS NULL
+                OR length(trim(NEW.resolution_note)) = 0
                 OR NEW.resolution_ai_confirmed != 1
-                OR NEW.resolved_by IS NULL
                 OR NEW.resolved_at IS NULL
+                ))
             )
             BEGIN
                 SELECT RAISE(
@@ -273,7 +404,7 @@ def create_user(full_name, username, password, role):
     if not name or len(name) > 120:
         raise ValueError("Name must be between 1 and 120 characters.")
     if role not in SELF_SIGNUP_ROLES:
-        raise ValueError("Self-registration is limited to Student and Faculty roles.")
+        raise ValueError("Self-registration is limited to Student accounts.")
     password_hash = hash_password(password)
     try:
         with _connection() as connection:
@@ -421,8 +552,34 @@ def authenticate_user(username, password):
     return None
 
 
-def get_users():
+def _require_actor(connection, actor_id, allowed_roles):
+    actor = connection.execute(
+        "SELECT id, full_name, username, role, is_active "
+        "FROM users WHERE id = ?",
+        (actor_id,),
+    ).fetchone()
+    if (
+        not actor
+        or not actor["is_active"]
+        or actor["role"] not in allowed_roles
+    ):
+        raise PermissionError("You do not have permission to perform this action.")
+    return actor
+
+
+def _record_audit(connection, actor, action_type, target_details):
+    connection.execute(
+        """
+        INSERT INTO audit_logs (admin_username, action_type, target_details)
+        VALUES (?, ?, ?)
+        """,
+        (actor["username"], action_type, target_details),
+    )
+
+
+def get_users(actor_id):
     with _connection() as connection:
+        _require_actor(connection, actor_id, {"Admin"})
         rows = connection.execute(
             """
             SELECT id, full_name, username, role, is_active, created_at
@@ -433,22 +590,33 @@ def get_users():
     return pd.DataFrame([dict(row) for row in rows])
 
 
+def get_audit_logs(actor_id):
+    with _connection() as connection:
+        _require_actor(connection, actor_id, {"Admin"})
+        rows = connection.execute(
+            """
+            SELECT admin_username, action_type, target_details, timestamp
+            FROM audit_logs
+            ORDER BY id DESC
+            LIMIT 200
+            """
+        ).fetchall()
+    return pd.DataFrame([dict(row) for row in rows])
+
+
 def update_user_role(actor_id, user_id, role):
     if role not in VALID_ROLES:
         raise ValueError("Invalid account role.")
     with _connection() as connection:
-        actor = connection.execute(
-            "SELECT role, is_active FROM users WHERE id = ?",
-            (actor_id,),
-        ).fetchone()
-        if not actor or actor["role"] != "Admin" or not actor["is_active"]:
-            raise PermissionError("Administrator access is required.")
+        _require_actor(connection, actor_id, {"Admin"})
         target = connection.execute(
             "SELECT role FROM users WHERE id = ?",
             (user_id,),
         ).fetchone()
         if not target:
             raise ValueError("The selected user no longer exists.")
+        if actor_id == user_id and role != "Admin":
+            raise ValueError("Administrators cannot change their own role.")
         if target["role"] == "Admin" and role != "Admin":
             active_admins = connection.execute(
                 """
@@ -462,16 +630,188 @@ def update_user_role(actor_id, user_id, role):
             "UPDATE users SET role = ? WHERE id = ?",
             (role, user_id),
         )
+        _record_audit(
+            connection,
+            _require_actor(connection, actor_id, {"Admin"}),
+            "user_role_update",
+            f"user_id={user_id}; new_role={role}",
+        )
 
 
-def add_complaint(user_id, name, complaint, category, priority):
+def delete_user(actor_id, user_id):
     with _connection() as connection:
+        actor = _require_actor(connection, actor_id, {"Admin"})
+        if actor_id == user_id:
+            raise ValueError("You cannot delete your own administrator account.")
+        target = connection.execute(
+            "SELECT username, role FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not target:
+            raise ValueError("The selected user no longer exists.")
+        if target["role"] == "Admin":
+            active_admins = connection.execute(
+                "SELECT COUNT(*) FROM users "
+                "WHERE role = 'Admin' AND is_active = 1"
+            ).fetchone()[0]
+            if active_admins <= 1:
+                raise ValueError("The last administrator cannot be deleted.")
+        _record_audit(
+            connection,
+            actor,
+            "user_deletion",
+            f"user_id={user_id}; username={target['username']}; role={target['role']}",
+        )
+        connection.execute(
+            "UPDATE complaints SET user_id = NULL, name = 'Deleted User' "
+            "WHERE user_id = ?",
+            (user_id,),
+        )
+        connection.execute(
+            "UPDATE complaints SET resolution_submitted_by = NULL "
+            "WHERE resolution_submitted_by = ?",
+            (user_id,),
+        )
+        connection.execute(
+            "UPDATE complaints SET resolved_by = NULL "
+            "WHERE resolved_by = ?",
+            (user_id,),
+        )
+        connection.execute(
+            "DELETE FROM login_attempts WHERE username = ?",
+            (target["username"],),
+        )
+        connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+
+def add_complaint(actor_id, complaint, category, priority, location):
+    if not isinstance(complaint, str) or not complaint.strip():
+        raise ValueError("Complaint description is required.")
+    if not isinstance(location, str) or not location.strip():
+        raise ValueError("Complaint location is required.")
+    with _connection() as connection:
+        actor = _require_actor(connection, actor_id, VALID_ROLES)
         connection.execute(
             """
-            INSERT INTO complaints (user_id, name, complaint, category, priority)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO complaints (
+                user_id, name, complaint, category, priority, location
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (user_id, name, complaint, category, priority),
+            (
+                actor_id,
+                actor["full_name"],
+                complaint.strip(),
+                category,
+                priority,
+                location.strip(),
+            ),
+        )
+
+
+def update_complaint_status(actor_id, complaint_id, status, resolution_note=""):
+    if status not in {"Pending", "In Progress", "Resolved"}:
+        raise ValueError("Invalid complaint status.")
+    if not isinstance(resolution_note, str):
+        raise ValueError("Resolution note must be text.")
+    resolution_note = resolution_note.strip()
+    if len(resolution_note) > 1000:
+        raise ValueError("Resolution notes must be 1000 characters or fewer.")
+
+    with _connection() as connection:
+        actor = _require_actor(
+            connection,
+            actor_id,
+            {"Admin", "Maintenance Staff"},
+        )
+        complaint = connection.execute(
+            "SELECT status FROM complaints WHERE id = ?",
+            (complaint_id,),
+        ).fetchone()
+        if not complaint:
+            raise ValueError("The selected complaint no longer exists.")
+
+        current_status = complaint["status"]
+        is_admin = actor["role"] == "Admin"
+        if not is_admin:
+            if status != "In Progress" or current_status not in {
+                "Pending",
+                "In Progress",
+            }:
+                raise PermissionError(
+                    "Maintenance Staff can move open complaints to In Progress. "
+                    "Submit repair evidence to mark one Resolved."
+                )
+        elif status == "Resolved" and not resolution_note:
+            raise ValueError("A resolution note is required to resolve a complaint.")
+
+        admin_override = int(is_admin and status == "Resolved")
+        connection.execute(
+            """
+            UPDATE complaints
+            SET status = ?,
+                resolution_note = CASE
+                    WHEN ? != '' THEN ? ELSE resolution_note
+                END,
+                resolution_notes = CASE
+                    WHEN ? != '' THEN ? ELSE resolution_notes
+                END,
+                resolution_admin_override = ?,
+                resolution_ai_confirmed = CASE WHEN ? = 1 THEN 0
+                    ELSE resolution_ai_confirmed END,
+                resolution_ai_feedback = CASE WHEN ? = 1
+                    THEN 'Resolved by an administrator override; not AI reviewed.'
+                    ELSE resolution_ai_feedback END,
+                resolved_by = CASE WHEN ? = 1 THEN ? ELSE NULL END,
+                resolved_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP
+                    ELSE NULL END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                status,
+                resolution_note,
+                resolution_note,
+                resolution_note,
+                resolution_note,
+                admin_override,
+                admin_override,
+                admin_override,
+                admin_override,
+                actor_id,
+                admin_override,
+                complaint_id,
+            ),
+        )
+        if is_admin:
+            _record_audit(
+                connection,
+                actor,
+                "forced_status_override",
+                f"complaint_id={complaint_id}; "
+                f"status={current_status}->{status}",
+            )
+
+
+def delete_complaint(actor_id, complaint_id):
+    with _connection() as connection:
+        actor = _require_actor(connection, actor_id, {"Admin"})
+        complaint = connection.execute(
+            "SELECT category, status FROM complaints WHERE id = ?",
+            (complaint_id,),
+        ).fetchone()
+        if not complaint:
+            raise ValueError("The selected complaint no longer exists.")
+        _record_audit(
+            connection,
+            actor,
+            "complaint_deletion",
+            f"complaint_id={complaint_id}; category={complaint['category']}; "
+            f"status={complaint['status']}",
+        )
+        connection.execute(
+            "DELETE FROM complaints WHERE id = ?",
+            (complaint_id,),
         )
 
 
@@ -540,12 +880,7 @@ def submit_resolution(
         raise ValueError("Resolution notes must be 1000 characters or fewer.")
 
     with _connection() as connection:
-        actor = connection.execute(
-            "SELECT role, is_active FROM users WHERE id = ?",
-            (actor_id,),
-        ).fetchone()
-        if not actor or actor["role"] != "Maintenance Staff" or not actor["is_active"]:
-            raise PermissionError("Maintenance Staff access is required to resolve complaints.")
+        actor = _require_actor(connection, actor_id, {"Maintenance Staff"})
 
         complaint = connection.execute(
             "SELECT status FROM complaints WHERE id = ?",
@@ -564,6 +899,7 @@ def submit_resolution(
             """
             UPDATE complaints
             SET status = ?,
+                resolution_note = ?,
                 resolution_image = ?,
                 resolution_latitude = ?,
                 resolution_longitude = ?,
@@ -577,11 +913,14 @@ def submit_resolution(
                 resolved_at = CASE
                     WHEN ? = 1 THEN CURRENT_TIMESTAMP
                     ELSE NULL
-                END
+                END,
+                resolution_admin_override = 0,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ? AND lower(status) != 'resolved'
             """,
             (
                 status,
+                resolution_notes,
                 image_bytes,
                 latitude,
                 longitude,
@@ -607,19 +946,15 @@ def submit_resolution(
 
 def get_complaint_resolution(viewer_id, complaint_id):
     with _connection() as connection:
-        viewer = connection.execute(
-            "SELECT role, is_active FROM users WHERE id = ?",
-            (viewer_id,),
-        ).fetchone()
-        if not viewer or not viewer["is_active"]:
-            raise PermissionError("An active account is required to view resolution evidence.")
+        viewer = _require_actor(connection, viewer_id, VALID_ROLES)
 
         complaint = connection.execute(
             """
             SELECT user_id, status, resolution_image, resolution_latitude,
                    resolution_longitude, resolution_accuracy, resolved_by,
                    resolved_at, resolution_notes, resolution_ai_feedback,
-                   resolution_ai_confirmed
+                   resolution_ai_confirmed, resolution_note,
+                   resolution_admin_override
             FROM complaints
             WHERE id = ?
             """,
@@ -645,26 +980,29 @@ def get_complaint_resolution(viewer_id, complaint_id):
             "accuracy": complaint["resolution_accuracy"],
             "status": complaint["status"],
             "notes": complaint["resolution_notes"],
+            "resolution_note": complaint["resolution_note"],
             "ai_feedback": complaint["resolution_ai_feedback"],
             "ai_confirmed": bool(complaint["resolution_ai_confirmed"]),
+            "admin_override": bool(complaint["resolution_admin_override"]),
             "resolved_by": complaint["resolved_by"],
             "resolved_at": complaint["resolved_at"],
         }
 
 
-def get_complaints(user_id=None):
+def get_complaints(viewer_id):
     with _connection() as connection:
-        if user_id is None:
+        viewer = _require_actor(connection, viewer_id, VALID_ROLES)
+        if viewer["role"] in {"Admin", "Maintenance Staff"}:
             query = """
-                SELECT id, name, complaint, category, priority, status
+                SELECT id, name, complaint, category, priority, status, location
                 FROM complaints
                 ORDER BY id DESC
             """
             return pd.read_sql_query(query, connection)
         query = """
-            SELECT id, name, complaint, category, priority, status
+            SELECT id, name, complaint, category, priority, status, location
             FROM complaints
             WHERE user_id = ?
             ORDER BY id DESC
         """
-        return pd.read_sql_query(query, connection, params=(user_id,))
+        return pd.read_sql_query(query, connection, params=(viewer_id,))
