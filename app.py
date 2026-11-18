@@ -1013,6 +1013,13 @@ elif page == "Submit Complaint":
         st.subheader("Personal Information")
 
         st.write(f"Submitting as **{user['full_name']}** ({user['role']}).")
+        anonymous_submission = st.checkbox(
+            "Submit anonymously",
+            help=(
+                "Your name will display as Anonymous. Your account remains "
+                "privately linked so you can track the complaint."
+            ),
+        )
 
         st.subheader("Complaint Information")
 
@@ -1075,6 +1082,7 @@ elif page == "Submit Complaint":
                         category,
                         priority,
                         location,
+                        anonymous=anonymous_submission,
                     )
 
                     st.success(

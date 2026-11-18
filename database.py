@@ -684,11 +684,20 @@ def delete_user(actor_id, user_id):
         connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
 
-def add_complaint(actor_id, complaint, category, priority, location):
+def add_complaint(
+    actor_id,
+    complaint,
+    category,
+    priority,
+    location,
+    anonymous=False,
+):
     if not isinstance(complaint, str) or not complaint.strip():
         raise ValueError("Complaint description is required.")
     if not isinstance(location, str) or not location.strip():
         raise ValueError("Complaint location is required.")
+    if not isinstance(anonymous, bool):
+        raise ValueError("Anonymous selection must be true or false.")
     with _connection() as connection:
         actor = _require_actor(connection, actor_id, VALID_ROLES)
         connection.execute(
@@ -700,7 +709,7 @@ def add_complaint(actor_id, complaint, category, priority, location):
             """,
             (
                 actor_id,
-                actor["full_name"],
+                "Anonymous" if anonymous else actor["full_name"],
                 complaint.strip(),
                 category,
                 priority,

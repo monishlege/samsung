@@ -143,6 +143,38 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(second_complaints.empty)
         self.assertEqual(len(all_complaints), 2)
 
+    def test_anonymous_complaint_hides_name_but_keeps_private_ownership(self):
+        owner_id = database.create_user(
+            "Anonymous Student",
+            "anonymous.student",
+            "a-long-and-unique-test-password",
+            "Student",
+        )
+        other_id = database.create_user(
+            "Other Student",
+            "other.student",
+            "another-long-unique-test-password",
+            "Student",
+        )
+        database.add_complaint(
+            owner_id,
+            "Broken library light",
+            "Electrical",
+            "Medium",
+            "Library",
+            anonymous=True,
+        )
+
+        owner_complaints = database.get_complaints(owner_id)
+        self.assertEqual(owner_complaints.iloc[0]["name"], "Anonymous")
+        self.assertTrue(database.get_complaints(other_id).empty)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            owner = connection.execute(
+                "SELECT user_id, name FROM complaints WHERE complaint = ?",
+                ("Broken library light",),
+            ).fetchone()
+        self.assertEqual(owner, (owner_id, "Anonymous"))
+
     def test_existing_complaints_are_preserved_by_schema_migration(self):
         with closing(sqlite3.connect(self.database_path)) as connection:
             columns = {
