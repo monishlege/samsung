@@ -6,6 +6,7 @@ A beginner-friendly campus complaint and facilities management dashboard built w
 - Roles: Student, Faculty, Admin and Maintenance Staff
 - Secure sign-in, student/faculty registration and admin role management
 - Complaint submission and status tracking
+- Maintenance Staff resolution with a required completion photo and browser GPS geotag
 - Automatic local complaint categorization and High/Medium/Low priority assessment from complaint text
 - Possible duplicate report detection
 - Recurring issue summaries
@@ -51,6 +52,7 @@ The first configured admin is created only when the database has no administrato
 - Sign-in is temporarily locked after five failed attempts for the same username.
 - Sessions expire after 30 minutes of inactivity or 12 hours total.
 - Students and faculty can only view their own complaints. Admin and Maintenance Staff accounts can view all complaints.
+- Only Maintenance Staff can resolve a complaint. Resolution requires a valid JPEG, PNG, or WebP completion photo (up to 5 MB) and GPS coordinates captured by the staff member's browser/device. Resolution photos and coordinates are stored in SQLite and shown to the complaint owner, Admin, and Maintenance Staff. Browser location access requires permission and a secure context (HTTPS or localhost).
 - The default SQLite file is `campus.db` beside the application. Set `CAMPUS_DB_PATH` (or `[database].path` in Streamlit secrets) to choose another path.
 
 **SQLite on Streamlit Community Cloud is not production-persistent.** Its local filesystem can be reset and does not provide durable backups or safe shared storage across multiple app instances. This SQLite configuration is suitable for local development or a single server with a persistent disk and managed backups. Before a production deployment on Community Cloud or any multi-instance host, move accounts and complaints to a managed, persistent database and configure backups.

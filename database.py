@@ -1,20 +1,24 @@
 import hashlib
 import hmac
+import math
 import os
 import re
 import secrets
 import sqlite3
 import time
+from io import BytesIO
 from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
+from PIL import Image, UnidentifiedImageError
 
 
 DB_NAME = os.environ.get(
     "CAMPUS_DB_PATH",
     str(Path(__file__).resolve().parent / "campus.db"),
 )
+MAX_RESOLUTION_IMAGE_BYTES = 5 * 1024 * 1024
 PASSWORD_ITERATIONS = 600_000
 PASSWORD_MIN_LENGTH = 12
 LOGIN_WINDOW_SECONDS = 15 * 60
@@ -76,7 +80,13 @@ def create_table():
                 category TEXT,
                 priority TEXT,
                 status TEXT DEFAULT 'Pending',
-                user_id INTEGER REFERENCES users(id)
+                user_id INTEGER REFERENCES users(id),
+                resolution_image BLOB,
+                resolution_latitude REAL,
+                resolution_longitude REAL,
+                resolution_accuracy REAL,
+                resolved_by INTEGER REFERENCES users(id),
+                resolved_at TEXT
             )
         """)
         complaint_columns = {
@@ -88,9 +98,65 @@ def create_table():
                 "ALTER TABLE complaints ADD COLUMN user_id "
                 "INTEGER REFERENCES users(id)"
             )
+        resolution_columns = {
+            "resolution_image": "BLOB",
+            "resolution_latitude": "REAL",
+            "resolution_longitude": "REAL",
+            "resolution_accuracy": "REAL",
+            "resolved_by": "INTEGER REFERENCES users(id)",
+            "resolved_at": "TEXT",
+        }
+        for column_name, column_type in resolution_columns.items():
+            if column_name not in complaint_columns:
+                connection.execute(
+                    f"ALTER TABLE complaints ADD COLUMN "
+                    f"{column_name} {column_type}"
+                )
         connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_complaints_user_id
             ON complaints(user_id)
+        """)
+        connection.execute("""
+            CREATE TRIGGER IF NOT EXISTS complaints_require_resolution_evidence_insert
+            BEFORE INSERT ON complaints
+            WHEN lower(NEW.status) = 'resolved' AND (
+                NEW.resolution_image IS NULL
+                OR length(NEW.resolution_image) = 0
+                OR NEW.resolution_latitude IS NULL
+                OR NEW.resolution_latitude NOT BETWEEN -90 AND 90
+                OR NEW.resolution_longitude IS NULL
+                OR NEW.resolution_longitude NOT BETWEEN -180 AND 180
+                OR NEW.resolution_accuracy IS NULL
+                OR NEW.resolution_accuracy < 0
+                OR NEW.resolved_by IS NULL
+                OR NEW.resolved_at IS NULL
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'Resolution requires photo and geotag evidence.');
+            END
+        """)
+        connection.execute("""
+            CREATE TRIGGER IF NOT EXISTS complaints_require_resolution_evidence_update
+            BEFORE UPDATE OF
+                status, resolution_image, resolution_latitude,
+                resolution_longitude, resolution_accuracy, resolved_by,
+                resolved_at
+            ON complaints
+            WHEN lower(NEW.status) = 'resolved' AND (
+                NEW.resolution_image IS NULL
+                OR length(NEW.resolution_image) = 0
+                OR NEW.resolution_latitude IS NULL
+                OR NEW.resolution_latitude NOT BETWEEN -90 AND 90
+                OR NEW.resolution_longitude IS NULL
+                OR NEW.resolution_longitude NOT BETWEEN -180 AND 180
+                OR NEW.resolution_accuracy IS NULL
+                OR NEW.resolution_accuracy < 0
+                OR NEW.resolved_by IS NULL
+                OR NEW.resolved_at IS NULL
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'Resolution requires photo and geotag evidence.');
+            END
         """)
         connection.execute("""
             CREATE TABLE IF NOT EXISTS login_attempts (
@@ -371,6 +437,146 @@ def add_complaint(user_id, name, complaint, category, priority):
             """,
             (user_id, name, complaint, category, priority),
         )
+
+
+def validate_resolution_image(image_bytes):
+    if not isinstance(image_bytes, (bytes, bytearray, memoryview)):
+        raise ValueError("Upload a completion photo.")
+    image_bytes = bytes(image_bytes)
+    if not image_bytes:
+        raise ValueError("Upload a completion photo.")
+    if len(image_bytes) > MAX_RESOLUTION_IMAGE_BYTES:
+        raise ValueError("The completion photo must be 5 MB or smaller.")
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            if image.format not in {"JPEG", "PNG", "WEBP"}:
+                raise ValueError("Use a JPEG, PNG, or WebP completion photo.")
+            if image.width * image.height > 40_000_000:
+                raise ValueError("The completion photo dimensions are too large.")
+            image.verify()
+    except (
+        Image.DecompressionBombError,
+        UnidentifiedImageError,
+        OSError,
+    ) as error:
+        raise ValueError("Upload a valid JPEG, PNG, or WebP completion photo.") from error
+
+    return image_bytes
+
+
+def _validate_geotag(latitude, longitude, accuracy):
+    coordinates = (
+        ("Latitude", latitude, -90, 90),
+        ("Longitude", longitude, -180, 180),
+    )
+    for label, value, minimum, maximum in coordinates:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not minimum <= value <= maximum
+        ):
+            raise ValueError(f"{label} must be a valid GPS coordinate.")
+
+    if (
+        isinstance(accuracy, bool)
+        or not isinstance(accuracy, (int, float))
+        or not math.isfinite(accuracy)
+        or accuracy < 0
+    ):
+        raise ValueError("GPS accuracy must be a valid non-negative number.")
+
+
+def resolve_complaint(
+    actor_id,
+    complaint_id,
+    image_bytes,
+    latitude,
+    longitude,
+    accuracy,
+):
+    with _connection() as connection:
+        actor = connection.execute(
+            "SELECT role, is_active FROM users WHERE id = ?",
+            (actor_id,),
+        ).fetchone()
+        if not actor or actor["role"] != "Maintenance Staff" or not actor["is_active"]:
+            raise PermissionError("Maintenance Staff access is required to resolve complaints.")
+
+        complaint = connection.execute(
+            "SELECT status FROM complaints WHERE id = ?",
+            (complaint_id,),
+        ).fetchone()
+        if not complaint:
+            raise ValueError("The selected complaint no longer exists.")
+        if str(complaint["status"]).strip().lower() == "resolved":
+            raise ValueError("This complaint has already been resolved.")
+
+        image_bytes = validate_resolution_image(image_bytes)
+        _validate_geotag(latitude, longitude, accuracy)
+        cursor = connection.execute(
+            """
+            UPDATE complaints
+            SET status = 'Resolved',
+                resolution_image = ?,
+                resolution_latitude = ?,
+                resolution_longitude = ?,
+                resolution_accuracy = ?,
+                resolved_by = ?,
+                resolved_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND lower(status) != 'resolved'
+            """,
+            (
+                image_bytes,
+                latitude,
+                longitude,
+                accuracy,
+                actor_id,
+                complaint_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("This complaint has already been resolved.")
+
+
+def get_complaint_resolution(viewer_id, complaint_id):
+    with _connection() as connection:
+        viewer = connection.execute(
+            "SELECT role, is_active FROM users WHERE id = ?",
+            (viewer_id,),
+        ).fetchone()
+        if not viewer or not viewer["is_active"]:
+            raise PermissionError("An active account is required to view resolution evidence.")
+
+        complaint = connection.execute(
+            """
+            SELECT user_id, status, resolution_image, resolution_latitude,
+                   resolution_longitude, resolution_accuracy, resolved_by,
+                   resolved_at
+            FROM complaints
+            WHERE id = ?
+            """,
+            (complaint_id,),
+        ).fetchone()
+        if not complaint:
+            return None
+        if (
+            viewer["role"] not in {"Admin", "Maintenance Staff"}
+            and complaint["user_id"] != viewer_id
+        ):
+            raise PermissionError("You cannot view this complaint's resolution evidence.")
+        if str(complaint["status"]).strip().lower() != "resolved":
+            return None
+
+        return {
+            "image": complaint["resolution_image"],
+            "latitude": complaint["resolution_latitude"],
+            "longitude": complaint["resolution_longitude"],
+            "accuracy": complaint["resolution_accuracy"],
+            "resolved_by": complaint["resolved_by"],
+            "resolved_at": complaint["resolved_at"],
+        }
 
 
 def get_complaints(user_id=None):

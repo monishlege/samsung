@@ -2,10 +2,12 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 import database
+from PIL import Image
 
 
 class DatabaseTests(unittest.TestCase):
@@ -143,7 +145,106 @@ class DatabaseTests(unittest.TestCase):
             ).fetchone()
 
         self.assertIn("user_id", columns)
+        self.assertIn("resolution_image", columns)
+        self.assertIn("resolution_latitude", columns)
+        self.assertIn("resolution_longitude", columns)
         self.assertEqual(legacy_complaint, ("Old issue", None))
+
+    def test_only_maintenance_staff_can_resolve_with_photo_and_gps(self):
+        database.create_bootstrap_admin(
+            "campusadmin",
+            "a-unique-bootstrap-password",
+        )
+        admin_id = database.authenticate_user(
+            "campusadmin",
+            "a-unique-bootstrap-password",
+        )["id"]
+        owner_id = database.create_user(
+            "Complaint Owner",
+            "complaint.owner",
+            "a-long-and-unique-test-password",
+            "Student",
+        )
+        staff_id = database.create_user(
+            "Maintenance Worker",
+            "maintenance.worker",
+            "another-long-unique-test-password",
+            "Student",
+        )
+        database.update_user_role(admin_id, staff_id, "Maintenance Staff")
+        database.add_complaint(
+            owner_id,
+            "Complaint Owner",
+            "Broken classroom fan",
+            "Electrical",
+            "Medium",
+        )
+        complaint_id = int(database.get_complaints(owner_id).iloc[0]["id"])
+
+        image_buffer = BytesIO()
+        Image.new("RGB", (2, 2), "green").save(image_buffer, format="PNG")
+        image_bytes = image_buffer.getvalue()
+
+        with self.assertRaises(PermissionError):
+            database.resolve_complaint(
+                owner_id,
+                complaint_id,
+                image_bytes,
+                12.9716,
+                77.5946,
+                8.0,
+            )
+        with self.assertRaises(ValueError):
+            database.resolve_complaint(
+                staff_id,
+                complaint_id,
+                image_bytes,
+                91,
+                77.5946,
+                8.0,
+            )
+        with self.assertRaises(ValueError):
+            database.resolve_complaint(
+                staff_id,
+                complaint_id,
+                b"not an image",
+                12.9716,
+                77.5946,
+                8.0,
+            )
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE complaints SET status = 'Resolved' WHERE id = ?",
+                    (complaint_id,),
+                )
+
+        database.resolve_complaint(
+            staff_id,
+            complaint_id,
+            image_bytes,
+            12.9716,
+            77.5946,
+            8.0,
+        )
+
+        complaints = database.get_complaints(owner_id)
+        self.assertEqual(complaints.iloc[0]["status"], "Resolved")
+        evidence = database.get_complaint_resolution(owner_id, complaint_id)
+        self.assertEqual(evidence["image"], image_bytes)
+        self.assertEqual(evidence["latitude"], 12.9716)
+        self.assertEqual(evidence["longitude"], 77.5946)
+        self.assertEqual(evidence["resolved_by"], staff_id)
+
+        other_user_id = database.create_user(
+            "Other Student",
+            "other.student",
+            "a-third-long-and-unique-test-password",
+            "Student",
+        )
+        with self.assertRaises(PermissionError):
+            database.get_complaint_resolution(other_user_id, complaint_id)
 
     def test_bootstrap_admin_and_last_admin_protection(self):
         self.assertTrue(

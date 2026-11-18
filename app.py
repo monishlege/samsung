@@ -1,5 +1,6 @@
 
 import base64
+import hashlib
 import logging
 import os
 import time
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 import database
 import ai_engine
@@ -23,6 +25,11 @@ st.set_page_config(
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded"
+)
+
+geolocation_component = components.declare_component(
+    "campusconnect_geolocation",
+    path=str(Path(__file__).parent / "components" / "geolocation"),
 )
 
 def _read_setting(section, name, environment_name):
@@ -506,6 +513,129 @@ def load_complaints():
     )
 
 
+def render_resolution_queue(df):
+    if user["role"] != "Maintenance Staff":
+        return
+
+    st.subheader("🛠️ Resolve a Complaint")
+    open_complaints = df[
+        ~df["Status"].astype(str).str.strip().str.lower().eq("resolved")
+    ]
+    if open_complaints.empty:
+        st.info("There are no open complaints to resolve.")
+        return
+
+    complaint_ids = open_complaints["ID"].astype(int).tolist()
+    complaint_labels = {
+        int(row["ID"]): (
+            f"#{int(row['ID'])} — {row['Category']} ({row['Priority']})"
+        )
+        for _, row in open_complaints.iterrows()
+    }
+    selected_id = st.selectbox(
+        "Select an open complaint",
+        complaint_ids,
+        format_func=lambda complaint_id: complaint_labels[complaint_id],
+    )
+    selected_complaint = open_complaints[
+        open_complaints["ID"].astype(int) == selected_id
+    ].iloc[0]
+    st.write(selected_complaint["Complaint"])
+    photo = st.file_uploader(
+        "Upload completion photo (JPEG, PNG, or WebP; maximum 5 MB)",
+        type=["jpg", "jpeg", "png", "webp"],
+        key=f"resolution_photo_{selected_id}",
+    )
+    if photo is None:
+        st.caption("A completion photo and device location are required to resolve it.")
+        return
+
+    try:
+        image_bytes = database.validate_resolution_image(photo.getvalue())
+    except ValueError as error:
+        st.error(str(error))
+        return
+    st.image(image_bytes, caption="Completion photo", width=320)
+
+    photo_digest = hashlib.sha256(image_bytes).hexdigest()[:16]
+    location = geolocation_component(
+        key=f"resolution_location_{selected_id}_{photo_digest}",
+    )
+    if not isinstance(location, dict):
+        st.caption(
+            "Capture the device location and allow your browser to share it."
+        )
+        return
+    if location.get("error"):
+        st.error(str(location["error"]))
+        return
+
+    try:
+        latitude = float(location["latitude"])
+        longitude = float(location["longitude"])
+        accuracy = float(location["accuracy"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        st.caption("Capture the device location before resolving this complaint.")
+        return
+
+    st.caption(
+        f"Captured GPS: {latitude:.6f}, {longitude:.6f} "
+        f"(accuracy ±{accuracy:.0f} m)"
+    )
+    if st.button(
+        "Mark Resolved",
+        key=f"resolve_complaint_{selected_id}",
+        type="primary",
+    ):
+        try:
+            database.resolve_complaint(
+                user["id"],
+                selected_id,
+                image_bytes,
+                latitude,
+                longitude,
+                accuracy,
+            )
+        except (PermissionError, ValueError) as error:
+            st.error(str(error))
+        else:
+            st.success("Complaint resolved with photo and GPS evidence.")
+            st.rerun()
+
+
+def render_resolution_evidence(df):
+    resolved_complaints = df[
+        df["Status"].astype(str).str.strip().str.lower().eq("resolved")
+    ]
+    if resolved_complaints.empty:
+        return
+
+    st.subheader("📷 Resolution Evidence")
+    for _, row in resolved_complaints.iterrows():
+        complaint_id = int(row["ID"])
+        with st.expander(f"Complaint #{complaint_id}"):
+            evidence = database.get_complaint_resolution(
+                user["id"],
+                complaint_id,
+            )
+            if (
+                not evidence
+                or not evidence["image"]
+                or evidence["latitude"] is None
+                or evidence["longitude"] is None
+                or evidence["accuracy"] is None
+            ):
+                st.info("No completion photo or geotag was recorded for this complaint.")
+                continue
+            st.image(evidence["image"], caption="Completion photo", width=420)
+            st.caption(
+                f"GPS: {evidence['latitude']:.6f}, "
+                f"{evidence['longitude']:.6f} "
+                f"(accuracy ±{evidence['accuracy']:.0f} m) · "
+                f"Resolved at {evidence['resolved_at']}"
+            )
+
+
 # ==================================================
 # 7. NORMALIZE PRIORITY VALUES
 # ==================================================
@@ -806,6 +936,8 @@ elif page == "View Complaints":
 
     df = load_complaints()
 
+    render_resolution_queue(df)
+
     if df.empty:
 
         st.info("No complaints are available.")
@@ -893,6 +1025,10 @@ elif page == "View Complaints":
             use_container_width=True,
             hide_index=True
         )
+
+        st.divider()
+
+        render_resolution_evidence(filtered_df)
 
         st.divider()
 

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      body {
+        color: #31333f;
+        font-family: sans-serif;
+        margin: 0;
+      }
+
+      button {
+        background: #0e6b50;
+        border: 0;
+        border-radius: 0.4rem;
+        color: white;
+        cursor: pointer;
+        font-size: 0.9rem;
+        padding: 0.55rem 0.8rem;
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.7;
+      }
+
+      #status {
+        font-size: 0.85rem;
+        margin-top: 0.45rem;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="capture-location" type="button">Capture device location</button>
+    <div id="status" role="status">Allow location access when your browser asks.</div>
+    <script>
+      const status = document.getElementById("status");
+      const button = document.getElementById("capture-location");
+
+      function sendValue(value) {
+        window.parent.postMessage(
+          {
+            isStreamlitMessage: true,
+            type: "streamlit:setComponentValue",
+            value,
+          },
+          "*"
+        );
+      }
+
+      function setFrameHeight() {
+        window.parent.postMessage(
+          {
+            isStreamlitMessage: true,
+            type: "streamlit:setFrameHeight",
+            height: document.body.scrollHeight,
+          },
+          "*"
+        );
+      }
+
+      button.addEventListener("click", () => {
+        if (!navigator.geolocation) {
+          status.textContent = "This browser does not support location access.";
+          sendValue({ error: status.textContent });
+          setFrameHeight();
+          return;
+        }
+
+        button.disabled = true;
+        status.textContent = "Waiting for device location...";
+        setFrameHeight();
+
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const result = {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              accuracy: position.coords.accuracy,
+            };
+            status.textContent =
+              `Location captured (accuracy ±${Math.round(result.accuracy)} m).`;
+            button.disabled = false;
+            sendValue(result);
+            setFrameHeight();
+          },
+          (error) => {
+            status.textContent =
+              error.code === error.PERMISSION_DENIED
+                ? "Location permission was denied. Allow it in your browser and try again."
+                : "Could not get device location. Check location services and try again.";
+            button.disabled = false;
+            sendValue({ error: status.textContent });
+            setFrameHeight();
+          },
+          { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
+        );
+      });
+
+      window.parent.postMessage(
+        {
+          isStreamlitMessage: true,
+          type: "streamlit:componentReady",
+          apiVersion: 1,
+        },
+        "*"
+      );
+      setFrameHeight();
+    </script>
+  </body>
+</html>
