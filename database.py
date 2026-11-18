@@ -13,6 +13,8 @@ from pathlib import Path
 import pandas as pd
 from PIL import Image, UnidentifiedImageError
 
+import ai_engine
+
 
 DB_NAME = os.environ.get(
     "CAMPUS_DB_PATH",
@@ -85,6 +87,12 @@ def create_table():
                 resolution_latitude REAL,
                 resolution_longitude REAL,
                 resolution_accuracy REAL,
+                resolution_notes TEXT,
+                resolution_ai_feedback TEXT,
+                resolution_ai_confirmed INTEGER NOT NULL DEFAULT 0
+                    CHECK (resolution_ai_confirmed IN (0, 1)),
+                resolution_submitted_by INTEGER REFERENCES users(id),
+                resolution_submitted_at TEXT,
                 resolved_by INTEGER REFERENCES users(id),
                 resolved_at TEXT
             )
@@ -103,6 +111,14 @@ def create_table():
             "resolution_latitude": "REAL",
             "resolution_longitude": "REAL",
             "resolution_accuracy": "REAL",
+            "resolution_notes": "TEXT",
+            "resolution_ai_feedback": "TEXT",
+            "resolution_ai_confirmed": (
+                "INTEGER NOT NULL DEFAULT 0 CHECK "
+                "(resolution_ai_confirmed IN (0, 1))"
+            ),
+            "resolution_submitted_by": "INTEGER REFERENCES users(id)",
+            "resolution_submitted_at": "TEXT",
             "resolved_by": "INTEGER REFERENCES users(id)",
             "resolved_at": "TEXT",
         }
@@ -116,6 +132,14 @@ def create_table():
             CREATE INDEX IF NOT EXISTS idx_complaints_user_id
             ON complaints(user_id)
         """)
+        connection.execute(
+            "DROP TRIGGER IF EXISTS "
+            "complaints_require_resolution_evidence_insert"
+        )
+        connection.execute(
+            "DROP TRIGGER IF EXISTS "
+            "complaints_require_resolution_evidence_update"
+        )
         connection.execute("""
             CREATE TRIGGER IF NOT EXISTS complaints_require_resolution_evidence_insert
             BEFORE INSERT ON complaints
@@ -128,19 +152,25 @@ def create_table():
                 OR NEW.resolution_longitude NOT BETWEEN -180 AND 180
                 OR NEW.resolution_accuracy IS NULL
                 OR NEW.resolution_accuracy < 0
+                OR NEW.resolution_notes IS NULL
+                OR length(trim(NEW.resolution_notes)) = 0
+                OR NEW.resolution_ai_confirmed != 1
                 OR NEW.resolved_by IS NULL
                 OR NEW.resolved_at IS NULL
             )
             BEGIN
-                SELECT RAISE(ABORT, 'Resolution requires photo and geotag evidence.');
+                SELECT RAISE(
+                    ABORT,
+                    'Resolution requires AI confirmation, photo, and GPS evidence.'
+                );
             END
         """)
         connection.execute("""
             CREATE TRIGGER IF NOT EXISTS complaints_require_resolution_evidence_update
             BEFORE UPDATE OF
                 status, resolution_image, resolution_latitude,
-                resolution_longitude, resolution_accuracy, resolved_by,
-                resolved_at
+                resolution_longitude, resolution_accuracy, resolution_notes,
+                resolution_ai_confirmed, resolved_by, resolved_at
             ON complaints
             WHEN lower(NEW.status) = 'resolved' AND (
                 NEW.resolution_image IS NULL
@@ -151,11 +181,17 @@ def create_table():
                 OR NEW.resolution_longitude NOT BETWEEN -180 AND 180
                 OR NEW.resolution_accuracy IS NULL
                 OR NEW.resolution_accuracy < 0
+                OR NEW.resolution_notes IS NULL
+                OR length(trim(NEW.resolution_notes)) = 0
+                OR NEW.resolution_ai_confirmed != 1
                 OR NEW.resolved_by IS NULL
                 OR NEW.resolved_at IS NULL
             )
             BEGIN
-                SELECT RAISE(ABORT, 'Resolution requires photo and geotag evidence.');
+                SELECT RAISE(
+                    ABORT,
+                    'Resolution requires AI confirmation, photo, and GPS evidence.'
+                );
             END
         """)
         connection.execute("""
@@ -488,14 +524,21 @@ def _validate_geotag(latitude, longitude, accuracy):
         raise ValueError("GPS accuracy must be a valid non-negative number.")
 
 
-def resolve_complaint(
+def submit_resolution(
     actor_id,
     complaint_id,
+    resolution_notes,
     image_bytes,
     latitude,
     longitude,
     accuracy,
 ):
+    if not isinstance(resolution_notes, str) or not resolution_notes.strip():
+        raise ValueError("Add notes describing the work performed and its outcome.")
+    resolution_notes = resolution_notes.strip()
+    if len(resolution_notes) > 1000:
+        raise ValueError("Resolution notes must be 1000 characters or fewer.")
+
     with _connection() as connection:
         actor = connection.execute(
             "SELECT role, is_active FROM users WHERE id = ?",
@@ -515,29 +558,51 @@ def resolve_complaint(
 
         image_bytes = validate_resolution_image(image_bytes)
         _validate_geotag(latitude, longitude, accuracy)
+        ai_confirmed, ai_feedback = ai_engine.review_resolution(resolution_notes)
+        status = "Resolved" if ai_confirmed else "In Progress"
         cursor = connection.execute(
             """
             UPDATE complaints
-            SET status = 'Resolved',
+            SET status = ?,
                 resolution_image = ?,
                 resolution_latitude = ?,
                 resolution_longitude = ?,
                 resolution_accuracy = ?,
-                resolved_by = ?,
-                resolved_at = CURRENT_TIMESTAMP
+                resolution_notes = ?,
+                resolution_ai_feedback = ?,
+                resolution_ai_confirmed = ?,
+                resolution_submitted_by = ?,
+                resolution_submitted_at = CURRENT_TIMESTAMP,
+                resolved_by = CASE WHEN ? = 1 THEN ? ELSE NULL END,
+                resolved_at = CASE
+                    WHEN ? = 1 THEN CURRENT_TIMESTAMP
+                    ELSE NULL
+                END
             WHERE id = ? AND lower(status) != 'resolved'
             """,
             (
+                status,
                 image_bytes,
                 latitude,
                 longitude,
                 accuracy,
+                resolution_notes,
+                ai_feedback,
+                int(ai_confirmed),
                 actor_id,
+                int(ai_confirmed),
+                actor_id,
+                int(ai_confirmed),
                 complaint_id,
             ),
         )
         if cursor.rowcount != 1:
             raise ValueError("This complaint has already been resolved.")
+        return {
+            "confirmed": ai_confirmed,
+            "feedback": ai_feedback,
+            "status": status,
+        }
 
 
 def get_complaint_resolution(viewer_id, complaint_id):
@@ -553,7 +618,8 @@ def get_complaint_resolution(viewer_id, complaint_id):
             """
             SELECT user_id, status, resolution_image, resolution_latitude,
                    resolution_longitude, resolution_accuracy, resolved_by,
-                   resolved_at
+                   resolved_at, resolution_notes, resolution_ai_feedback,
+                   resolution_ai_confirmed
             FROM complaints
             WHERE id = ?
             """,
@@ -566,7 +632,10 @@ def get_complaint_resolution(viewer_id, complaint_id):
             and complaint["user_id"] != viewer_id
         ):
             raise PermissionError("You cannot view this complaint's resolution evidence.")
-        if str(complaint["status"]).strip().lower() != "resolved":
+        if (
+            str(complaint["status"]).strip().lower() != "resolved"
+            and complaint["resolution_image"] is None
+        ):
             return None
 
         return {
@@ -574,6 +643,10 @@ def get_complaint_resolution(viewer_id, complaint_id):
             "latitude": complaint["resolution_latitude"],
             "longitude": complaint["resolution_longitude"],
             "accuracy": complaint["resolution_accuracy"],
+            "status": complaint["status"],
+            "notes": complaint["resolution_notes"],
+            "ai_feedback": complaint["resolution_ai_feedback"],
+            "ai_confirmed": bool(complaint["resolution_ai_confirmed"]),
             "resolved_by": complaint["resolved_by"],
             "resolved_at": complaint["resolved_at"],
         }

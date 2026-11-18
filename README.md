@@ -6,11 +6,13 @@ A beginner-friendly campus complaint and facilities management dashboard built w
 - Roles: Student, Faculty, Admin and Maintenance Staff
 - Secure sign-in, student/faculty registration and admin role management
 - Complaint submission and status tracking
-- Maintenance Staff resolution with a required completion photo and browser GPS geotag
+- Maintenance Staff resolution submissions with a required completion photo and browser GPS geotag
+- Local AI review of resolution notes; a complaint is marked Resolved only when the notes clearly confirm completion
 - Automatic local complaint categorization and High/Medium/Low priority assessment from complaint text
 - Possible duplicate report detection
 - Recurring issue summaries
 - Dashboard metrics, filters and user management
+- Responsive layout for mobile and tablet screens
 - SQLite database created automatically
 
 ## Run locally (Windows PowerShell)
@@ -52,10 +54,10 @@ The first configured admin is created only when the database has no administrato
 - Sign-in is temporarily locked after five failed attempts for the same username.
 - Sessions expire after 30 minutes of inactivity or 12 hours total.
 - Students and faculty can only view their own complaints. Admin and Maintenance Staff accounts can view all complaints.
-- Only Maintenance Staff can resolve a complaint. Resolution requires a valid JPEG, PNG, or WebP completion photo (up to 5 MB) and GPS coordinates captured by the staff member's browser/device. Resolution photos and coordinates are stored in SQLite and shown to the complaint owner, Admin, and Maintenance Staff. Browser location access requires permission and a secure context (HTTPS or localhost).
+- Only Maintenance Staff can submit a resolution. The local rule-based AI checks the staff member's notes for a clear completion statement; if it cannot confirm the issue is fixed, the complaint stays In Progress and the AI feedback is shown. The AI does not visually analyze the photo. A submission also requires a valid JPEG, PNG, or WebP completion photo (up to 5 MB) and GPS coordinates captured by the staff member's browser/device. Resolution notes, photos, and coordinates are stored in SQLite and shown to the complaint owner, Admin, and Maintenance Staff. Browser location access requires permission and a secure context (HTTPS or localhost).
 - The default SQLite file is `campus.db` beside the application. Set `CAMPUS_DB_PATH` (or `[database].path` in Streamlit secrets) to choose another path.
 
 **SQLite on Streamlit Community Cloud is not production-persistent.** Its local filesystem can be reset and does not provide durable backups or safe shared storage across multiple app instances. This SQLite configuration is suitable for local development or a single server with a persistent disk and managed backups. Before a production deployment on Community Cloud or any multi-instance host, move accounts and complaints to a managed, persistent database and configure backups.
 
 ## Important
-This remains an academic prototype, not a fully production-ready service. Complaint categorization and priority are assigned automatically by explainable local keyword rules; they do not use a trained model or send complaint text to an external AI service. Before handling real campus data, add a persistent managed database, automated backups, email verification, password reset and MFA policies, operational monitoring, and a privacy review.
+This remains an academic prototype, not a fully production-ready service. Complaint categorization, priority, and resolution review use explainable local keyword rules, not a trained model or external AI service. Resolution review checks text notes only; it cannot verify repair quality from the photo. Before handling real campus data, add a persistent managed database, automated backups, email verification, password reset and MFA policies, operational monitoring, and a privacy review.

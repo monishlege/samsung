@@ -150,7 +150,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("resolution_longitude", columns)
         self.assertEqual(legacy_complaint, ("Old issue", None))
 
-    def test_only_maintenance_staff_can_resolve_with_photo_and_gps(self):
+    def test_only_ai_confirmed_maintenance_submission_can_resolve(self):
         database.create_bootstrap_admin(
             "campusadmin",
             "a-unique-bootstrap-password",
@@ -186,32 +186,51 @@ class DatabaseTests(unittest.TestCase):
         image_bytes = image_buffer.getvalue()
 
         with self.assertRaises(PermissionError):
-            database.resolve_complaint(
+            database.submit_resolution(
                 owner_id,
                 complaint_id,
+                "The fan works now.",
                 image_bytes,
                 12.9716,
                 77.5946,
                 8.0,
             )
         with self.assertRaises(ValueError):
-            database.resolve_complaint(
+            database.submit_resolution(
                 staff_id,
                 complaint_id,
+                "The fan works now.",
                 image_bytes,
                 91,
                 77.5946,
                 8.0,
             )
         with self.assertRaises(ValueError):
-            database.resolve_complaint(
+            database.submit_resolution(
                 staff_id,
                 complaint_id,
+                "The fan works now.",
                 b"not an image",
                 12.9716,
                 77.5946,
                 8.0,
             )
+
+        rejected = database.submit_resolution(
+            staff_id,
+            complaint_id,
+            "Repaired the fan, but it is still not working.",
+            image_bytes,
+            12.9716,
+            77.5946,
+            8.0,
+        )
+        self.assertFalse(rejected["confirmed"])
+        self.assertEqual(rejected["status"], "In Progress")
+        self.assertEqual(
+            database.get_complaints(owner_id).iloc[0]["status"],
+            "In Progress",
+        )
 
         with closing(sqlite3.connect(self.database_path)) as connection:
             with self.assertRaises(sqlite3.IntegrityError):
@@ -220,14 +239,17 @@ class DatabaseTests(unittest.TestCase):
                     (complaint_id,),
                 )
 
-        database.resolve_complaint(
+        approved = database.submit_resolution(
             staff_id,
             complaint_id,
+            "Repaired the fan; it works now.",
             image_bytes,
             12.9716,
             77.5946,
             8.0,
         )
+        self.assertTrue(approved["confirmed"])
+        self.assertEqual(approved["status"], "Resolved")
 
         complaints = database.get_complaints(owner_id)
         self.assertEqual(complaints.iloc[0]["status"], "Resolved")
@@ -236,6 +258,9 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(evidence["latitude"], 12.9716)
         self.assertEqual(evidence["longitude"], 77.5946)
         self.assertEqual(evidence["resolved_by"], staff_id)
+        self.assertTrue(evidence["ai_confirmed"])
+        self.assertEqual(evidence["notes"], "Repaired the fan; it works now.")
+        self.assertTrue(evidence["ai_feedback"])
 
         other_user_id = database.create_user(
             "Other Student",

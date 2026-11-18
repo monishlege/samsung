@@ -1,6 +1,6 @@
 import unittest
 
-from ai_engine import analyze_complaint
+from ai_engine import analyze_complaint, review_resolution
 
 
 class ComplaintAnalysisTests(unittest.TestCase):
@@ -51,6 +51,27 @@ class ComplaintAnalysisTests(unittest.TestCase):
             )[1],
             "High",
         )
+
+    def test_resolution_review_requires_clear_completion(self):
+        self.assertEqual(
+            review_resolution("Replaced the fan; it works now."),
+            (
+                True,
+                "The notes state that the issue was fixed, restored, completed, "
+                "or is working.",
+            ),
+        )
+        confirmed, feedback = review_resolution(
+            "Repaired the fan, but it is still not working."
+        )
+        self.assertFalse(confirmed)
+        self.assertIn("complaint remains open", feedback)
+
+        confirmed, feedback = review_resolution("Replaced the fan.")
+        self.assertFalse(confirmed)
+        self.assertIn("do not clearly confirm", feedback)
+
+        self.assertFalse(review_resolution("")[0])
 
 
 if __name__ == "__main__":

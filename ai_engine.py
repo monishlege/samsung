@@ -53,6 +53,21 @@ LOW_PRIORITY_KEYWORDS = [
 
 NEGATION_WORDS = {"no", "not", "never", "without", "absent", "neither"}
 
+RESOLUTION_CONFIRMED_TERMS = [
+    "fixed", "repaired", "resolved", "restored", "completed",
+    "working now", "works now", "working again", "functioning normally",
+    "operational now", "cleaned", "unclogged", "reconnected", "sealed",
+    "replaced and tested",
+]
+
+RESOLUTION_OPEN_TERMS = [
+    "not fixed", "not repaired", "not resolved", "not completed",
+    "still broken", "still leaking", "still not working", "issue remains",
+    "problem remains", "needs repair", "pending repair", "awaiting parts",
+    "unable to repair", "could not repair", "couldn't repair",
+    "cannot repair", "still needs work",
+]
+
 
 def _normalize_text(text):
     return re.sub(r"[\W_]+", " ", str(text).lower()).strip()
@@ -104,3 +119,32 @@ def analyze_complaint(text):
         priority = "Medium"
 
     return category, priority
+
+
+def review_resolution(resolution_notes):
+    normalized_notes = _normalize_text(resolution_notes)
+    if not normalized_notes:
+        return False, "Add notes describing the work performed and its outcome."
+
+    if any(_has_term(normalized_notes, term) for term in RESOLUTION_OPEN_TERMS):
+        return (
+            False,
+            "The notes indicate that work may still be needed. "
+            "The complaint remains open.",
+        )
+
+    if any(
+        _has_term(normalized_notes, term)
+        for term in RESOLUTION_CONFIRMED_TERMS
+    ):
+        return (
+            True,
+            "The notes state that the issue was fixed, restored, completed, "
+            "or is working.",
+        )
+
+    return (
+        False,
+        "The notes do not clearly confirm the issue is fixed. "
+        "Describe the repair and its result.",
+    )

@@ -414,6 +414,90 @@ p, li, label, .stMarkdown {
     color: #60A5FA !important;
 }
 
+/* Adapt columns, controls, and text to small screens */
+@media (max-width: 768px) {
+    .block-container {
+        padding: 1rem 1rem 2rem !important;
+    }
+
+    .stApp {
+        background-attachment: scroll;
+    }
+
+    h1 {
+        font-size: 30px !important;
+        line-height: 1.2 !important;
+    }
+
+    h2 {
+        font-size: 24px !important;
+    }
+
+    h3 {
+        font-size: 19px !important;
+    }
+
+    [data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap !important;
+        gap: 0.65rem !important;
+    }
+
+    [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+        flex: 1 1 calc(50% - 0.65rem) !important;
+        width: calc(50% - 0.65rem) !important;
+        min-width: 0 !important;
+    }
+
+    [data-testid="stMetric"] {
+        padding: 14px !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        font-size: 26px !important;
+    }
+
+    .stButton > button,
+    .stFormSubmitButton > button {
+        min-height: 48px !important;
+        white-space: normal !important;
+    }
+
+    [data-testid="stDataFrame"],
+    [data-testid="stTable"],
+    [data-testid="stFileUploader"],
+    [data-testid="stImage"] {
+        max-width: 100% !important;
+    }
+
+    [data-testid="stImage"] img {
+        max-width: 100% !important;
+        height: auto !important;
+    }
+}
+
+@media (max-width: 480px) {
+    .block-container {
+        padding: 0.75rem 0.75rem 1.5rem !important;
+    }
+
+    h1 {
+        font-size: 26px !important;
+    }
+
+    h2 {
+        font-size: 21px !important;
+    }
+
+    [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+        flex-basis: 100% !important;
+        width: 100% !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        font-size: 24px !important;
+    }
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -517,7 +601,7 @@ def render_resolution_queue(df):
     if user["role"] != "Maintenance Staff":
         return
 
-    st.subheader("🛠️ Resolve a Complaint")
+    st.subheader("🛠️ Submit a Resolution")
     open_complaints = df[
         ~df["Status"].astype(str).str.strip().str.lower().eq("resolved")
     ]
@@ -540,7 +624,26 @@ def render_resolution_queue(df):
     selected_complaint = open_complaints[
         open_complaints["ID"].astype(int) == selected_id
     ].iloc[0]
+    previous_review = database.get_complaint_resolution(
+        user["id"],
+        selected_id,
+    )
+    if previous_review and previous_review["status"] != "Resolved":
+        st.warning(
+            f"Previous AI review: {previous_review['ai_feedback']} "
+            "The complaint is still open."
+        )
+
     st.write(selected_complaint["Complaint"])
+    resolution_notes = st.text_area(
+        "Describe the repair and how you confirmed the issue is fixed",
+        max_chars=1000,
+        key=f"resolution_notes_{selected_id}",
+    )
+    st.caption(
+        "Local AI rules review these notes only; the uploaded photo is stored "
+        "as evidence but is not visually analyzed."
+    )
     photo = st.file_uploader(
         "Upload completion photo (JPEG, PNG, or WebP; maximum 5 MB)",
         type=["jpg", "jpeg", "png", "webp"],
@@ -583,24 +686,37 @@ def render_resolution_queue(df):
         f"(accuracy ±{accuracy:.0f} m)"
     )
     if st.button(
-        "Mark Resolved",
+        "Submit for AI Review",
         key=f"resolve_complaint_{selected_id}",
         type="primary",
     ):
-        try:
-            database.resolve_complaint(
-                user["id"],
-                selected_id,
-                image_bytes,
-                latitude,
-                longitude,
-                accuracy,
-            )
-        except (PermissionError, ValueError) as error:
-            st.error(str(error))
+        if not resolution_notes.strip():
+            st.error("Describe the repair and its result before submitting.")
         else:
-            st.success("Complaint resolved with photo and GPS evidence.")
-            st.rerun()
+            try:
+                review = database.submit_resolution(
+                    user["id"],
+                    selected_id,
+                    resolution_notes,
+                    image_bytes,
+                    latitude,
+                    longitude,
+                    accuracy,
+                )
+            except (PermissionError, ValueError) as error:
+                st.error(str(error))
+            else:
+                if review["confirmed"]:
+                    st.success(
+                        "AI confirmed the repair from the notes. "
+                        "The complaint is now Resolved."
+                    )
+                    st.rerun()
+                else:
+                    st.warning(
+                        f"AI did not confirm the repair: {review['feedback']} "
+                        "The complaint remains In Progress."
+                    )
 
 
 def render_resolution_evidence(df):
@@ -627,6 +743,10 @@ def render_resolution_evidence(df):
             ):
                 st.info("No completion photo or geotag was recorded for this complaint.")
                 continue
+            if evidence["notes"]:
+                st.write(f"Maintenance notes: {evidence['notes']}")
+            if evidence["ai_feedback"]:
+                st.caption(f"AI review: {evidence['ai_feedback']}")
             st.image(evidence["image"], caption="Completion photo", width=420)
             st.caption(
                 f"GPS: {evidence['latitude']:.6f}, "
