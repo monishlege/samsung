@@ -6,7 +6,7 @@ A beginner-friendly campus complaint and facilities management dashboard built w
 - Roles: Student, Faculty, Admin and Maintenance Staff
 - Secure sign-in, student/faculty registration and admin role management
 - Complaint submission and status tracking
-- AI-assisted category and priority suggestions (keyword-based starter engine)
+- Automatic local complaint categorization and High/Medium/Low priority assessment from complaint text
 - Possible duplicate report detection
 - Recurring issue summaries
 - Dashboard metrics, filters and user management
@@ -56,4 +56,4 @@ The first configured admin is created only when the database has no administrato
 **SQLite on Streamlit Community Cloud is not production-persistent.** Its local filesystem can be reset and does not provide durable backups or safe shared storage across multiple app instances. This SQLite configuration is suitable for local development or a single server with a persistent disk and managed backups. Before a production deployment on Community Cloud or any multi-instance host, move accounts and complaints to a managed, persistent database and configure backups.
 
 ## Important
-This remains an academic prototype, not a fully production-ready service. The AI engine uses explainable keyword rules, not a trained model. Before handling real campus data, add a persistent managed database, automated backups, email verification, password reset and MFA policies, operational monitoring, and a privacy review.
+This remains an academic prototype, not a fully production-ready service. Complaint categorization and priority are assigned automatically by explainable local keyword rules; they do not use a trained model or send complaint text to an external AI service. Before handling real campus data, add a persistent managed database, automated backups, email verification, password reset and MFA policies, operational monitoring, and a privacy review.
